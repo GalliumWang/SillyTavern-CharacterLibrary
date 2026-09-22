@@ -224,10 +224,18 @@ function setDrawerIconHighlight(rootSelector, active) {
 
 function setActivePaneHighlight(active) {
     setDrawerIconHighlight('#st-gallery-btn', active);
+    syncFoldedLauncherHighlight();
 }
 
 function setLorebooksHighlight(active) {
     setDrawerIconHighlight('#st-lorebooks-btn', active);
+    syncFoldedLauncherHighlight();
+}
+
+// On a narrow top bar the gallery icon stands in for both panels.
+function syncFoldedLauncherHighlight() {
+    if (!isNarrowTopBar() || getShowDropdownInEmbedded()) return;
+    setDrawerIconHighlight('#st-gallery-btn', _embeddedVisible);
 }
 
 function buildIframeUrl() {
@@ -355,6 +363,19 @@ function deliverToIframe(msg) {
         window.location.origin
     );
     _pendingIframeMessage = null;
+}
+
+// Menu rows should open the named surface. The desktop library icon still toggles.
+function openLibraryFromLauncher() {
+    if (getDisplayMode() === 'embedded' && _embeddedVisible && _lorebooksOnly) {
+        _lorebooksOnly = false;
+        deliverToIframe({ type: 'cl-show-library' });
+        setActivePaneHighlight(true);
+        setLorebooksHighlight(false);
+        applyEmbeddedFrame();
+        return;
+    }
+    openGallery();
 }
 
 function openLorebooks() {
@@ -617,7 +638,8 @@ function injectLauncherStyles() {
             font-size: 15px;
             opacity: 0.85;
         }
-        .charlib-launcher-item[data-action="library"] i {
+        .charlib-launcher-item[data-action="library"] i,
+        .charlib-launcher-item[data-action="lorebooks"] i {
             color: var(--SmartThemeQuoteColor, #b4a0ff);
         }
         .charlib-launcher-divider {
@@ -775,7 +797,9 @@ function setupLauncherDropdown() {
             bypassIntercept = true;
             drawerToggle.click();               // Replay click to ST's handler
         } else if (item.dataset.action === 'library') {
-            openGallery();
+            openLibraryFromLauncher();
+        } else if (item.dataset.action === 'lorebooks') {
+            openLorebooks();
         }
     });
 
@@ -822,7 +846,9 @@ function ensureStandaloneGalleryButton(shouldExist) {
     galleryBtn.on('click', function(e) {
         e.preventDefault();
         e.stopPropagation();
-        openGallery();
+        // Narrow screens have no room for a second icon. This button opens the menu.
+        if (isNarrowTopBar() && !getShowDropdownInEmbedded()) toggleGalleryLauncher();
+        else openGallery();
     });
 
     let injected = false;
@@ -891,9 +917,134 @@ function placeTopBarDrawer($el) {
     return false;
 }
 
-// Always present. Opens the lorebook manager in the embedded panel, including when the
-// Characters button is hijacked and there is no separate Character Library icon.
+// SillyTavern's own mobile layout starts at 1000px. The fixed top bar does not scroll,
+// so a second extension icon pushes the native buttons off both edges.
+const narrowTopBarQuery = window.matchMedia('(max-width: 1000px)');
+
+function isNarrowTopBar() {
+    return narrowTopBarQuery.matches;
+}
+
+let _galleryLauncherOpen = false;
+
+function hideGalleryLauncher() {
+    document.getElementById('charlib-gallery-launcher')?.classList.remove('visible');
+    document.getElementById('charlib-gallery-launcher-scrim')?.classList.remove('visible');
+    _galleryLauncherOpen = false;
+}
+
+function toggleGalleryLauncher() {
+    injectLauncherStyles();
+    let dropdown = document.getElementById('charlib-gallery-launcher');
+    let scrim = document.getElementById('charlib-gallery-launcher-scrim');
+    if (!dropdown) {
+        scrim = document.createElement('div');
+        scrim.id = 'charlib-gallery-launcher-scrim';
+        scrim.className = 'charlib-launcher-scrim';
+        dropdown = document.createElement('div');
+        dropdown.id = 'charlib-gallery-launcher';
+        dropdown.className = 'charlib-launcher-dropdown';
+        dropdown.innerHTML = `
+            <div class="charlib-launcher-item" data-action="library">
+                <i class="fa-solid fa-layer-group"></i>
+                <span>Character Library</span>
+            </div>
+            <div class="charlib-launcher-item" data-action="lorebooks">
+                <i class="fa-solid fa-book-atlas"></i>
+                <span>Lorebooks</span>
+            </div>
+        `;
+        scrim.addEventListener('click', () => hideGalleryLauncher());
+        dropdown.addEventListener('click', (e) => {
+            const item = e.target.closest('[data-action]');
+            if (!item) return;
+            e.stopPropagation();
+            hideGalleryLauncher();
+            if (item.dataset.action === 'lorebooks') openLorebooks();
+            else openLibraryFromLauncher();
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && _galleryLauncherOpen) {
+                e.stopPropagation();
+                hideGalleryLauncher();
+            }
+        });
+        document.body.appendChild(scrim);
+        document.body.appendChild(dropdown);
+    }
+    if (_galleryLauncherOpen) {
+        hideGalleryLauncher();
+        return;
+    }
+    const anchor = document.querySelector('#st-gallery-btn .drawer-icon') || document.getElementById('st-gallery-btn');
+    if (!anchor) return;
+    const rect = anchor.getBoundingClientRect();
+    const menuWidth = 210;
+    let right = window.innerWidth - rect.right - 10;
+    if (window.innerWidth - right - menuWidth < 8) right = window.innerWidth - menuWidth - 8;
+    dropdown.style.top = (rect.bottom + 6) + 'px';
+    dropdown.style.right = Math.max(8, right) + 'px';
+    dropdown.style.left = 'auto';
+    scrim.classList.add('visible');
+    dropdown.classList.add('visible');
+    _galleryLauncherOpen = true;
+}
+
+function ensureCharactersLorebooksItem(show) {
+    const dropdown = document.getElementById('charlib-launcher-dropdown');
+    if (!dropdown) return;
+    dropdown.querySelectorAll('.charlib-lorebooks-fold').forEach(el => el.remove());
+    if (!show) return;
+    dropdown.insertAdjacentHTML('beforeend', `
+        <div class="charlib-launcher-divider charlib-lorebooks-fold"></div>
+        <div class="charlib-launcher-item charlib-lorebooks-fold" data-action="lorebooks">
+            <i class="fa-solid fa-book-atlas"></i>
+            <span>Lorebooks</span>
+        </div>
+    `);
+}
+
+function syncGalleryChevron(show) {
+    const icon = document.getElementById('charlib-launcher-icon');
+    if (!icon) return;
+    let chevron = icon.querySelector('.charlib-chevron-badge');
+    if (!show) {
+        chevron?.remove();
+        icon.title = 'Open Character Library';
+        return;
+    }
+    if (getComputedStyle(icon).position === 'static') icon.style.position = 'relative';
+    if (!chevron) {
+        chevron = document.createElement('i');
+        chevron.className = 'fa-solid fa-caret-down charlib-chevron-badge';
+        icon.appendChild(chevron);
+    }
+    icon.title = 'Character Library and Lorebooks';
+}
+
+// Phone: one icon. Characters-button dropdown gets a Lorebooks row; otherwise the
+// Character Library icon opens a two-item menu. Desktop keeps two separate icons.
+function syncTopBarFold() {
+    const narrow = isNarrowTopBar();
+    const charactersMenu = getShowDropdownInEmbedded() && !!document.getElementById('charlib-launcher-dropdown');
+    if (narrow) $('#st-lorebooks-btn').remove();
+    ensureCharactersLorebooksItem(narrow && charactersMenu);
+    if (!narrow || charactersMenu) hideGalleryLauncher();
+    syncGalleryChevron(narrow && !charactersMenu && !!document.getElementById('st-gallery-btn'));
+    syncFoldedLauncherHighlight();
+}
+
+// Always present on a wide top bar. Opens the lorebook manager in the embedded panel,
+// including when the Characters button is hijacked and there is no separate library icon.
 function ensureLorebooksButton() {
+    if (isNarrowTopBar()) {
+        $('#st-lorebooks-btn').remove();
+        syncTopBarFold();
+        return;
+    }
+    hideGalleryLauncher();
+    ensureCharactersLorebooksItem(false);
+    syncGalleryChevron(false);
     let $btn = $('#st-lorebooks-btn');
     if (!$btn.length) {
         $btn = $(`
@@ -1004,9 +1155,10 @@ function injectExtensionSettings() {
 
         document.getElementById('charlib-show-dropdown').addEventListener('change', (e) => {
             setShowDropdownInEmbedded(e.target.checked);
-            const chev = document.querySelector('.charlib-chevron-badge');
+            const chev = document.querySelector('#rightNavDrawerIcon .charlib-chevron-badge');
             if (chev) chev.style.display = e.target.checked ? '' : 'none';
             ensureStandaloneGalleryButton(!e.target.checked);
+            syncTopBarFold();
         });
 
         document.getElementById('charlib-exclusive-panes').addEventListener('change', (e) => {
@@ -1118,6 +1270,12 @@ jQuery(async () => {
         ensureStandaloneGalleryButton(true);
     }
     ensureLorebooksButton();
+    if (typeof narrowTopBarQuery.addEventListener === 'function') {
+        narrowTopBarQuery.addEventListener('change', () => {
+            hideGalleryLauncher();
+            ensureLorebooksButton();
+        });
+    }
     
     // SlashCommandParser/SlashCommand live on getContext().
     try {
