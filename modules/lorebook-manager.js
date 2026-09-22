@@ -1985,9 +1985,12 @@ function charLinkRowHtml(c) {
     const isThis = cur === linkBook;
     const hasOther = cur && cur !== linkBook;
     const isAux = linkAuxSet.has(c.avatar);
+    // Additional membership does not replace the card's primary lorebook, so the
+    // primary-conflict warning only belongs on the primary Link picker.
+    const warnOtherPrimary = hasOther && !linkAuxManage && !linkAsAux;
     let status = isThis
         ? `<span class="lb-link-status current"><i class="fa-solid fa-check"></i> Linked here</span>`
-        : hasOther
+        : warnOtherPrimary
             ? `<span class="lb-link-status other" title="Currently linked to ${esc(cur)}"><i class="fa-solid fa-triangle-exclamation"></i> <span class="lb-link-status-name">${esc(cur)}</span></span>`
             : '';
     if (isAux) status += `<span class="lb-link-status aux" title="Already one of this character's additional lorebooks"><i class="fa-solid fa-plus"></i> Additional here</span>`;
