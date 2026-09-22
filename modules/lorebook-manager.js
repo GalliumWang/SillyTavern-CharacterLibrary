@@ -381,6 +381,7 @@ function closeModal() {
 }
 
 function forceClose() {
+    const returnToChat = document.documentElement.classList.contains('cl-lorebooks-only');
     document.getElementById('lorebookModal')?.classList.add('hidden');
     // Release the heavy buffers so a closed manager doesn't pin a full world file + string snapshot
     // + live char refs for the session (the back-to-list and delete paths already did; desktop close was the gap).
@@ -401,6 +402,34 @@ function forceClose() {
     invalidateChatIndex();
     // Reset the lens to match the freshly-built toggle DOM (defaults to Characters) on reopen.
     usedByMode = 'characters';
+    // Top-bar launch owns the whole embedded panel. Closing the manager returns to the chat.
+    // The in-library entry (⋮ → Lorebooks) leaves this class off, so it only hides the modal.
+    if (returnToChat && window.parent && window.parent !== window) {
+        window.parent.postMessage({ source: 'character-library', type: 'cl-close' }, window.location.origin);
+    }
+}
+
+// Character names for "used by" arrive after the book list. Repaint the sidebar counts and the
+// open editor's chips without rebuilding the entry form (that would drop in-progress edits).
+async function refreshUsedBy() {
+    const modal = document.getElementById('lorebookModal');
+    if (!modal || modal.classList.contains('hidden') || !worldsList.length) return;
+    buildLinkedMap();
+    await refreshAuxMap();
+    renderWorldList();
+    paintEditorUsedBy();
+}
+
+function paintEditorUsedBy() {
+    const meta = document.querySelector('#lbContent .lb-editor-meta');
+    if (!meta || !currentWorld) return;
+    const pill = meta.querySelector(':scope > .lb-meta-pill');
+    if (!pill) return;
+    while (pill.nextSibling) pill.nextSibling.remove();
+    const html = usedByMode === 'chats'
+        ? renderBoundChatChips()
+        : renderLinkedChips(linkedMap.get(currentWorld) || [], auxMap.get(currentWorld) || []);
+    pill.insertAdjacentHTML('afterend', html);
 }
 
 // ========================================
@@ -4435,9 +4464,10 @@ function init() {
     CoreAPI.debugLog('[Lorebooks] Module initialized');
 }
 
-export { openModal, closeModal };
+export { openModal, closeModal, refreshUsedBy };
 
 export default {
     init,
     openModal,
+    refreshUsedBy,
 };

@@ -2328,3 +2328,16 @@ html.cl-mobile .lb-ai-modal-content textarea::placeholder {
 @media (max-width: 480px) {
     html.cl-mobile .lb-ai-src-opt span { display: none; }
 }
+
+/* Launched from the SillyTavern top bar: the manager is the panel, not a dialog on the library. */
+html.cl-lorebooks-only #lorebookModal.modal-overlay {
+    padding: 0;
+    background: var(--bg-primary, #121212);
+}
+html.cl-lorebooks-only #lorebookModal .lb-modal-glass {
+    width: 100% !important;
+    max-width: none !important;
+    height: 100% !important;
+    max-height: none !important;
+    border-radius: 0 !important;
+}

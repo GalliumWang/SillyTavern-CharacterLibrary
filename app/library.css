@@ -11018,6 +11018,32 @@ html.cl-initial-loading .mobile-fab {
     display: none !important;
 }
 
+/* Top-bar lorebooks launch: the manager fills the embedded panel. The library shell
+   stays in the DOM (character details still open on top) but is not shown. */
+html.cl-lorebooks-only .app-container,
+html.cl-lorebooks-only #mobileBottomNav,
+html.cl-lorebooks-only #mobileFab,
+html.cl-lorebooks-only #mobileOnlineSearchOverlay {
+    display: none !important;
+}
+html.cl-lorebooks-only body::before {
+    content: "Loading lorebooks…";
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-secondary, #a0a0a0);
+    font-size: 14px;
+    pointer-events: none;
+    z-index: 1;
+}
+html.cl-lorebooks-only:has(#lorebookModal:not(.hidden)) body::before,
+html.cl-lorebooks-only.cl-lorebooks-booted body::before {
+    content: none;
+    display: none;
+}
+
 /* Filters wrapper - prevents layout shift */
 .filters-wrapper {
     display: flex;

@@ -199,6 +199,9 @@ function migrateSettings() {
 let _iframeContainer = null;
 let _iframe = null;
 let _embeddedVisible = false;
+let _lorebooksOnly = false;
+let _iframeReady = false;
+let _pendingIframeMessage = null;
 
 function isEmbeddedActive() {
     return _embeddedVisible;
@@ -207,16 +210,24 @@ function isEmbeddedActive() {
 // ST's drawer icons use closedIcon (opacity 0.3) vs openIcon (opacity 1.0) to indicate
 // the active pane. Mirror that for our standalone button only. The hijacked Characters
 // icon opens our dropdown (not CL directly), so it isn't a CL state indicator.
-function setActivePaneHighlight(active) {
-    const standalone = document.querySelector('#st-gallery-btn .drawer-icon');
-    if (!standalone) return;
+function setDrawerIconHighlight(rootSelector, active) {
+    const icon = document.querySelector(`${rootSelector} .drawer-icon`);
+    if (!icon) return;
     if (active) {
-        standalone.classList.remove('closedIcon');
-        standalone.classList.add('openIcon');
+        icon.classList.remove('closedIcon');
+        icon.classList.add('openIcon');
     } else {
-        standalone.classList.remove('openIcon');
-        standalone.classList.add('closedIcon');
+        icon.classList.remove('openIcon');
+        icon.classList.add('closedIcon');
     }
+}
+
+function setActivePaneHighlight(active) {
+    setDrawerIconHighlight('#st-gallery-btn', active);
+}
+
+function setLorebooksHighlight(active) {
+    setDrawerIconHighlight('#st-lorebooks-btn', active);
 }
 
 function buildIframeUrl() {
@@ -227,7 +238,7 @@ function buildIframeUrl() {
     return url;
 }
 
-function createEmbeddedContainer() {
+function createEmbeddedContainer(src) {
     if (_iframeContainer) return;
 
     const container = document.createElement('div');
@@ -245,7 +256,8 @@ function createEmbeddedContainer() {
 
     const iframe = document.createElement('iframe');
     iframe.id = 'charlib-embedded-iframe';
-    iframe.src = buildIframeUrl();
+    iframe.src = src || buildIframeUrl();
+    _iframeReady = false;
     iframe.setAttribute('allow', 'clipboard-write');
     Object.assign(iframe.style, {
         width: '100%',
@@ -289,36 +301,73 @@ function closeAllSTDrawers() {
     }
 }
 
+function setHostTopBarVisible(visible) {
+    for (const id of ['top-bar', 'top-settings-holder']) {
+        const el = document.getElementById(id);
+        if (el) el.style.display = visible ? '' : 'none';
+    }
+}
+
+function applyEmbeddedFrame() {
+    if (!_iframeContainer) return;
+    // Lorebooks keeps the SillyTavern top bar so the button that opened it stays on screen.
+    const keepTopBar = _lorebooksOnly || !shouldHideTopBar();
+    if (keepTopBar) {
+        _iframeContainer.style.top = 'var(--topBarBlockSize, 37px)';
+        _iframeContainer.style.height = 'calc(100dvh - var(--topBarBlockSize, 37px))';
+        setHostTopBarVisible(true);
+    } else {
+        _iframeContainer.style.top = '0';
+        _iframeContainer.style.height = '100dvh';
+        setHostTopBarVisible(false);
+    }
+}
+
 function showEmbedded() {
     if (!_iframeContainer) createEmbeddedContainer();
     if (getExclusivePanes()) closeAllSTDrawers();
     _iframeContainer.style.display = 'block';
     _embeddedVisible = true;
-    setActivePaneHighlight(true);
-    if (shouldHideTopBar()) {
-        _iframeContainer.style.top = '0';
-        _iframeContainer.style.height = '100dvh';
-        for (const id of ['top-bar', 'top-settings-holder']) {
-            const el = document.getElementById(id);
-            if (el) el.style.display = 'none';
-        }
-    } else {
-        _iframeContainer.style.top = 'var(--topBarBlockSize, 37px)';
-        _iframeContainer.style.height = 'calc(100dvh - var(--topBarBlockSize, 37px))';
-    }
+    setActivePaneHighlight(!_lorebooksOnly);
+    setLorebooksHighlight(_lorebooksOnly);
+    applyEmbeddedFrame();
 }
 
 function hideEmbedded() {
     if (!_iframeContainer) return;
+    const wasLorebooks = _lorebooksOnly;
     _iframeContainer.style.display = 'none';
     _embeddedVisible = false;
+    _lorebooksOnly = false;
     setActivePaneHighlight(false);
+    setLorebooksHighlight(false);
     _iframeContainer.style.top = 'var(--topBarBlockSize, 37px)';
     _iframeContainer.style.height = '';
-    for (const id of ['top-bar', 'top-settings-holder']) {
-        const el = document.getElementById(id);
-        if (el) el.style.display = '';
+    setHostTopBarVisible(true);
+    if (wasLorebooks) deliverToIframe({ type: 'cl-show-library' });
+}
+
+function deliverToIframe(msg) {
+    _pendingIframeMessage = msg;
+    if (!_iframeReady || !_iframe?.contentWindow) return;
+    _iframe.contentWindow.postMessage(
+        { source: 'character-library-host', ...msg },
+        window.location.origin
+    );
+    _pendingIframeMessage = null;
+}
+
+function openLorebooks() {
+    _lorebooksOnly = true;
+    setActivePaneHighlight(false);
+    setLorebooksHighlight(true);
+    if (!_iframeContainer) {
+        createEmbeddedContainer(buildIframeUrl() + '&open=lorebooks&lorebooksOnly=1');
+        showEmbedded();
+        return;
     }
+    deliverToIframe({ type: 'cl-open-lorebooks', lorebooksOnly: true });
+    if (_iframeReady && _embeddedVisible) applyEmbeddedFrame();
 }
 
 let _exclusivePanesObserver = null;
@@ -366,6 +415,24 @@ function setupPostMessageBridge() {
         switch (msg.type) {
             case 'cl-close': {
                 hideEmbedded();
+                break;
+            }
+            case 'cl-ready': {
+                _iframeReady = true;
+                if (_pendingIframeMessage && _iframe?.contentWindow) {
+                    const pending = _pendingIframeMessage;
+                    _pendingIframeMessage = null;
+                    _iframe.contentWindow.postMessage(
+                        { source: 'character-library-host', ...pending },
+                        window.location.origin
+                    );
+                }
+                break;
+            }
+            case 'cl-lorebooks-visible': {
+                if (!_lorebooksOnly) break;
+                if (!_embeddedVisible) showEmbedded();
+                else applyEmbeddedFrame();
                 break;
             }
             case 'cl-open-character': {
@@ -733,9 +800,13 @@ function ensureStandaloneGalleryButton(shouldExist) {
     const existing = document.getElementById('st-gallery-btn');
     if (!shouldExist) {
         if (existing) existing.remove();
+        ensureLorebooksButton();
         return;
     }
-    if (existing) return;
+    if (existing) {
+        ensureLorebooksButton();
+        return;
+    }
 
     // Mirror ST's native top-bar drawer structure so the icon inherits --topBarIconSize,
     // fa-fw width normalization, and theme hover/opacity. Using a plain .menu_button looks
@@ -793,7 +864,62 @@ function ensureStandaloneGalleryButton(shouldExist) {
         $('body').append(galleryBtn);
     }
 
-    if (isEmbeddedActive()) setActivePaneHighlight(true);
+    if (isEmbeddedActive()) setActivePaneHighlight(!_lorebooksOnly);
+    ensureLorebooksButton();
+}
+
+function placeTopBarDrawer($el) {
+    const gallery = $('#st-gallery-btn');
+    if (gallery.length) {
+        gallery.after($el);
+        return true;
+    }
+    const rightNavHolder = $('#rightNavHolder');
+    if (rightNavHolder.length) {
+        rightNavHolder.after($el);
+        return true;
+    }
+    const fallbackTargets = ['#top-settings-holder', '#top-bar'];
+    for (const selector of fallbackTargets) {
+        const target = $(selector);
+        if (!target.length) continue;
+        const children = target.children();
+        if (children.length > 1) $(children[Math.floor(children.length / 2)]).after($el);
+        else target.append($el);
+        return true;
+    }
+    return false;
+}
+
+// Always present. Opens the lorebook manager in the embedded panel, including when the
+// Characters button is hijacked and there is no separate Character Library icon.
+function ensureLorebooksButton() {
+    let $btn = $('#st-lorebooks-btn');
+    if (!$btn.length) {
+        $btn = $(`
+        <div id="st-lorebooks-btn" class="drawer">
+            <div class="drawer-toggle drawer-header">
+                <div class="drawer-icon fa-solid fa-book-atlas fa-fw closedIcon" title="Open Lorebooks" data-i18n="[title]Open Lorebooks"></div>
+            </div>
+        </div>
+        `);
+        $btn.on('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            openLorebooks();
+        });
+    }
+    if (!placeTopBarDrawer($btn)) {
+        $btn.css({
+            position: 'fixed', top: '2px', right: '210px', 'z-index': '20000',
+            background: 'rgba(0,0,0,0.5)', border: '1px solid rgba(255,255,255,0.2)',
+            padding: '5px', height: '40px', width: '40px',
+            display: 'flex', 'align-items': 'center', 'justify-content': 'center',
+            'border-radius': '5px'
+        });
+        $('body').append($btn);
+    }
+    setLorebooksHighlight(_lorebooksOnly && isEmbeddedActive());
 }
 
 // ==============================================
@@ -873,23 +999,7 @@ function injectExtensionSettings() {
                     window.location.origin
                 );
             }
-            if (isEmbeddedActive()) {
-                if (e.target.checked) {
-                    _iframeContainer.style.top = 'var(--topBarBlockSize, 37px)';
-                    _iframeContainer.style.height = 'calc(100dvh - var(--topBarBlockSize, 37px))';
-                    for (const id of ['top-bar', 'top-settings-holder']) {
-                        const el = document.getElementById(id);
-                        if (el) el.style.display = '';
-                    }
-                } else {
-                    _iframeContainer.style.top = '0';
-                    _iframeContainer.style.height = '100dvh';
-                    for (const id of ['top-bar', 'top-settings-holder']) {
-                        const el = document.getElementById(id);
-                        if (el) el.style.display = 'none';
-                    }
-                }
-            }
+            if (isEmbeddedActive()) applyEmbeddedFrame();
         });
 
         document.getElementById('charlib-show-dropdown').addEventListener('change', (e) => {
@@ -920,6 +1030,11 @@ function injectExtensionSettings() {
                 _iframeContainer = null;
                 _iframe = null;
                 _embeddedVisible = false;
+                _iframeReady = false;
+                _lorebooksOnly = false;
+                _pendingIframeMessage = null;
+                setLorebooksHighlight(false);
+                setActivePaneHighlight(false);
             }
         });
 
@@ -1002,6 +1117,7 @@ jQuery(async () => {
     if (!hijacked || !getShowDropdownInEmbedded()) {
         ensureStandaloneGalleryButton(true);
     }
+    ensureLorebooksButton();
     
     // SlashCommandParser/SlashCommand live on getContext().
     try {

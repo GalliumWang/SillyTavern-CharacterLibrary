@@ -7,7 +7,7 @@
     <meta name="referrer" content="no-referrer">
     <meta name="character-library" content="1"><!-- marker for the optional JanitorAI bridge userscript -->
     <title>SillyTavern Character Library</title>
-    <link rel="stylesheet" href="library.css?v=110">
+    <link rel="stylesheet" href="library.css?v=111">
     <link rel="stylesheet" href="library-mobile.css?v=38">
     <!-- Noto Sans from SillyTavern's bundled webfonts -->
     <link rel="stylesheet" href="/webfonts/NotoSans/stylesheet.css">
@@ -29,6 +29,9 @@
         // applyModalSize in library.js — keep maps in sync if those change.
         (function () {
             try {
+                if (new URLSearchParams(location.search).get('lorebooksOnly') === '1') {
+                    document.documentElement.classList.add('cl-lorebooks-only');
+                }
                 // Only iOS (incl. iPadOS, which reports as a Mac with touch) auto-zooms on input
                 // focus below 16px font. Tag <html> so that 16px guard can be scoped to iOS alone
                 // and every other platform keeps the compact scale. All iOS browsers are WebKit, so
@@ -3628,8 +3631,8 @@ https://jannyai.com/characters/uuid_slug
     <div id="toastContainer" class="toast-container"></div>
 
     <!-- Scripts -->
-    <script src="library.js?v=199"></script>
-    <script type="module" src="../modules/module-loader.js?v=51"></script>
+    <script src="library.js?v=200"></script>
+    <script type="module" src="../modules/module-loader.js?v=52"></script>
     <script src="library-mobile.js?v=26"></script>
 </body>
 </html>

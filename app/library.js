@@ -13,8 +13,11 @@ window.registerOverlay = window.registerOverlay || function(cfg) {
 };
 
 const API_BASE = '/api'; 
-const isEmbedded = new URLSearchParams(window.location.search).get('embedded') === '1';
-const embeddedShowTopBar = new URLSearchParams(window.location.search).get('showTopBar') === '1';
+const _launchParams = new URLSearchParams(window.location.search);
+const isEmbedded = _launchParams.get('embedded') === '1';
+const embeddedShowTopBar = _launchParams.get('showTopBar') === '1';
+const launchLorebooks = _launchParams.get('open') === 'lorebooks';
+const launchLorebooksOnly = _launchParams.get('lorebooksOnly') === '1';
 let allCharacters = [];
 let currentCharacters = [];
 
@@ -8301,6 +8304,78 @@ function closeEmbeddedPanel() {
     }
 }
 
+// Top-bar Lorebooks button. The host opens this same page in the embedded panel and asks
+// for the manager directly. lorebooksOnly hides the character grid so closing the manager
+// returns to the chat instead of the library.
+let _pendingLorebooksOpen = null;
+let _lorebooksOpenTimer = null;
+
+function setLorebooksOnlyMode(on) {
+    document.documentElement.classList.toggle('cl-lorebooks-only', !!on);
+}
+
+function notifyLorebooksVisible() {
+    if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ source: 'character-library', type: 'cl-lorebooks-visible' }, window.location.origin);
+    }
+}
+
+function queueLorebooksOpen(lorebooksOnly) {
+    _pendingLorebooksOpen = { lorebooksOnly: !!lorebooksOnly };
+    if (lorebooksOnly) setLorebooksOnlyMode(true);
+    notifyLorebooksVisible();
+    flushLorebooksOpen();
+}
+
+function flushLorebooksOpen() {
+    if (!_pendingLorebooksOpen) return;
+    if (typeof window.openLorebookManager !== 'function') {
+        if (!_lorebooksOpenTimer) _lorebooksOpenTimer = setInterval(flushLorebooksOpen, 50);
+        return;
+    }
+    if (_lorebooksOpenTimer) {
+        clearInterval(_lorebooksOpenTimer);
+        _lorebooksOpenTimer = null;
+    }
+    const job = _pendingLorebooksOpen;
+    _pendingLorebooksOpen = null;
+    setLorebooksOnlyMode(job.lorebooksOnly);
+    window.openLorebookManager();
+    document.documentElement.classList.add('cl-lorebooks-booted');
+}
+
+// Hide the manager and bring the character grid back, without discarding an in-progress edit.
+// The panel is already hidden by the host when this runs, so the next library open shows the grid
+// and the next lorebooks open restores the editor via openModal's keepSelection path.
+function suspendLorebooksToLibrary() {
+    _pendingLorebooksOpen = null;
+    setLorebooksOnlyMode(false);
+    document.getElementById('lorebookModal')?.classList.add('hidden');
+}
+
+function setupLorebooksHostBridge() {
+    if (window.__clLorebooksHostBridge) return;
+    window.__clLorebooksHostBridge = true;
+    window.addEventListener('message', (e) => {
+        if (e.origin !== window.location.origin) return;
+        const msg = e.data;
+        if (!msg || msg.source !== 'character-library-host') return;
+        if (msg.type === 'cl-open-lorebooks') queueLorebooksOpen(!!msg.lorebooksOnly);
+        else if (msg.type === 'cl-show-library') suspendLorebooksToLibrary();
+    });
+}
+
+async function refreshLorebookUsedByWhenReady() {
+    const start = Date.now();
+    while (Date.now() - start < 20000) {
+        if (typeof window.refreshLorebookUsedBy === 'function') {
+            try { await window.refreshLorebookUsedBy(); } catch (e) { console.warn('[Lorebooks] used-by refresh failed', e); }
+            return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
+}
+
 function setupEmbeddedUI() {
     document.body.classList.add('embedded-mode');
 
@@ -8331,6 +8406,12 @@ function setupEmbeddedUI() {
 document.addEventListener('DOMContentLoaded', async () => {
     // Lock view-toggle / bottom-nav until fetchCharacters finishes (eg. user cant tap into Chats mid-load)
     document.documentElement.classList.add('cl-initial-loading');
+
+    setupLorebooksHostBridge();
+    if (launchLorebooks) queueLorebooksOpen(launchLorebooksOnly);
+    if (isEmbedded && window.parent !== window) {
+        window.parent.postMessage({ source: 'character-library', type: 'cl-ready' }, window.location.origin);
+    }
 
     if (isEmbedded) {
         setupEmbeddedUI();
@@ -8413,6 +8494,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     } finally {
         // Unlock even on fetch failure so the user isnt stranded
         document.documentElement.classList.remove('cl-initial-loading');
+        // Book list can paint before this returns. Fill "used by" once names exist.
+        refreshLorebookUsedByWhenReady();
     }
     setupEventListeners();
 
