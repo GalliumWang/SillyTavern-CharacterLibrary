@@ -360,6 +360,7 @@
 .lb-editor-title-row {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: var(--space-md);
 }
 
@@ -378,8 +379,15 @@
 .lb-editor-actions {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: var(--space-xs);
     flex-shrink: 0;
+}
+
+.lb-link-row.locked {
+    opacity: 0.55;
+    cursor: not-allowed;
 }
 
 /* Editor overflow (kebab) menu: secondary actions collapse here on mobile. */

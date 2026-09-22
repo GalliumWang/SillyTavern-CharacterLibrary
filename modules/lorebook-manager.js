@@ -171,6 +171,7 @@ let usedByMode = 'characters';
 let chatBoundMap = new Map();
 let chatIndexLoaded = false;     // has the reverse index been built this session?
 let chatIndexLoading = false;
+let chatIndexFailed = false;
 
 let currentWorld = null;      // file_id of the open world
 let workingWorld = null;      // deep-cloned working copy { entries: {...}, ... }
@@ -198,6 +199,7 @@ let linkBook = null;             // file_id the picker is linking
 let linkMode = 'characters';     // 'characters' | 'chats'
 let linkManageMode = false;      // true = "manage links" view (show only linked, action = unlink)
 let linkAsAux = false;           // characters mode: add as additional book instead of setting primary
+let linkAuxManage = false;       // characters mode: checked set IS the additional-lorebook membership
 let linkAuxSet = new Set();      // avatars carrying linkBook as an additional book (per picker open)
 let manageChatList = [];         // chats mode + manage: the book's bound chats (cross-character)
 let linkChatChar = null;         // chats mode: the character whose chats we're picking
@@ -352,7 +354,7 @@ async function openModal(focusWorld) {
         if (sortSel) CoreAPI.initCustomSelect(sortSel);
     }
     modal.classList.remove('hidden');
-    // Sync the persistent toggle DOM + placeholder to the (reset) Characters lens on each open.
+    // Keep whichever used-by lens was last open. The toggle DOM is created with Characters active.
     document.querySelectorAll('.lb-usedby-opt').forEach(b => b.classList.toggle('active', b.dataset.mode === usedByMode));
     const wsEl = document.getElementById('lbWorldSearch');
     if (wsEl) wsEl.placeholder = usedByMode === 'chats' ? 'Search lorebooks or chats...' : 'Search lorebooks or characters...';
@@ -364,6 +366,7 @@ async function openModal(focusWorld) {
     } else if (target) {
         CoreAPI.showToast(`Lorebook "${target}" not found`, 'warning');
     }
+    if (usedByMode === 'chats') ensureChatIndex();
 }
 
 function closeModal() {
@@ -400,8 +403,6 @@ function forceClose() {
     linkChatChar = null;
     // Drop the chat reverse index (can be large); it rebuilds lazily on next Chats toggle.
     invalidateChatIndex();
-    // Reset the lens to match the freshly-built toggle DOM (defaults to Characters) on reopen.
-    usedByMode = 'characters';
     // Top-bar launch owns the whole embedded panel. Closing the manager returns to the chat.
     // The in-library entry (⋮ → Lorebooks) leaves this class off, so it only hides the modal.
     if (returnToChat && window.parent && window.parent !== window) {
@@ -426,10 +427,7 @@ function paintEditorUsedBy() {
     const pill = meta.querySelector(':scope > .lb-meta-pill');
     if (!pill) return;
     while (pill.nextSibling) pill.nextSibling.remove();
-    const html = usedByMode === 'chats'
-        ? renderBoundChatChips()
-        : renderLinkedChips(linkedMap.get(currentWorld) || [], auxMap.get(currentWorld) || []);
-    pill.insertAdjacentHTML('afterend', html);
+    pill.insertAdjacentHTML('afterend', renderRelationMeta());
 }
 
 // ========================================
@@ -539,7 +537,7 @@ function usedByCount(fileId) {
 // Lazy: only when the user first flips to Chats mode. Cached for the session; invalidated
 // on bind/unbind. Re-renders the sidebar when ready so badges fill in.
 async function ensureChatIndex() {
-    if (chatIndexLoaded || chatIndexLoading) return;
+    if (chatIndexLoaded || chatIndexLoading || chatIndexFailed) return;
     chatIndexLoading = true;
     renderWorldList(); // show "..." placeholders immediately
     try {
@@ -551,16 +549,19 @@ async function ensureChatIndex() {
         }
         chatIndexLoaded = true;
     } catch (e) {
+        chatIndexFailed = true;
         console.error('[Lorebooks] chat index build failed', e);
     } finally {
         chatIndexLoading = false;
         renderWorldList();
-        if (currentWorld) renderEditor();
+        // Patch the chips only. A full renderEditor here would wipe entry text typed while the index loaded.
+        if (currentWorld) paintEditorUsedBy();
     }
 }
 
 function invalidateChatIndex() {
     chatIndexLoaded = false;
+    chatIndexFailed = false;
     chatBoundMap = new Map();
 }
 
@@ -825,7 +826,7 @@ function renderEditor() {
     const entries = sortedEntries();
     const total = Object.keys(workingWorld.entries).length;
     const displayName = currentWorld; // the filename (file_id) is the canonical name, matching ST
-    const usingChats = usedByMode === 'chats';
+    if (!chatIndexLoaded && !chatIndexLoading && !chatIndexFailed) ensureChatIndex();
 
     el.innerHTML = `
         <div class="lb-editor">
@@ -836,8 +837,14 @@ function renderEditor() {
                         <button class="lb-save-btn${dirty ? ' dirty' : ''}" id="lbSaveBtn" data-action="save" ${dirty ? '' : 'disabled'} title="Save changes">
                             <i class="fa-solid fa-floppy-disk"></i> <span>${dirty ? 'Save *' : 'Saved'}</span>
                         </button>
-                        <button class="lb-link-btn lb-action-desktop" data-action="${usingChats ? 'bind-chats' : 'link-chars'}" title="${usingChats ? 'Bind this lorebook to chats' : 'Link this lorebook to characters'}">
-                            <i class="fa-solid fa-${usingChats ? 'comments' : 'link'}"></i> <span>${usingChats ? 'Bind' : 'Link'}</span>
+                        <button class="lb-link-btn lb-action-desktop" data-action="link-chars" title="Set this lorebook as the primary lorebook on characters">
+                            <i class="fa-solid fa-link"></i> <span>Link</span>
+                        </button>
+                        <button class="lb-link-btn lb-action-desktop" data-action="link-aux" title="Manage which characters use this as an additional lorebook">
+                            <i class="fa-solid fa-book-medical"></i> <span>Additional</span>
+                        </button>
+                        <button class="lb-link-btn lb-action-desktop" data-action="bind-chats" title="Bind this lorebook to chats">
+                            <i class="fa-solid fa-comments"></i> <span>Chats</span>
                         </button>
                         <button class="lb-icon-btn lb-action-desktop" data-action="rename-world" title="Rename"><i class="fa-solid fa-pen"></i></button>
                         <button class="lb-icon-btn lb-action-desktop" data-action="duplicate-world" title="Duplicate"><i class="fa-solid fa-clone"></i></button>
@@ -846,7 +853,9 @@ function renderEditor() {
                         <div class="lb-editor-overflow lb-action-mobile">
                             <button class="lb-icon-btn" data-action="editor-overflow" aria-label="More actions" title="More"><i class="fa-solid fa-ellipsis-vertical"></i></button>
                             <div class="lb-split-menu lb-editor-overflow-menu hidden" id="lbEditorOverflowMenu">
-                                <button class="dropdown-item" data-action="${usingChats ? 'bind-chats' : 'link-chars'}"><i class="fa-solid fa-${usingChats ? 'comments' : 'link'}"></i> ${usingChats ? 'Bind to chats' : 'Link to characters'}</button>
+                                <button class="dropdown-item" data-action="link-chars"><i class="fa-solid fa-link"></i> Link to characters</button>
+                                <button class="dropdown-item" data-action="link-aux"><i class="fa-solid fa-book-medical"></i> Additional lorebooks</button>
+                                <button class="dropdown-item" data-action="bind-chats"><i class="fa-solid fa-comments"></i> Bind to chats</button>
                                 <button class="dropdown-item" data-action="rename-world"><i class="fa-solid fa-pen"></i> Rename</button>
                                 <button class="dropdown-item" data-action="duplicate-world"><i class="fa-solid fa-clone"></i> Duplicate</button>
                                 <button class="dropdown-item" data-action="export-world"><i class="fa-solid fa-file-export"></i> Export JSON</button>
@@ -857,7 +866,7 @@ function renderEditor() {
                 </div>
                 <div class="lb-editor-meta">
                     <span class="lb-meta-pill"><i class="fa-solid fa-list"></i> ${total} ${total === 1 ? 'entry' : 'entries'}</span>
-                    ${usingChats ? renderBoundChatChips() : renderLinkedChips(linkedMap.get(currentWorld) || [], auxMap.get(currentWorld) || [])}
+                    ${renderRelationMeta()}
                 </div>
             </div>
 
@@ -920,12 +929,13 @@ function renderLinkedChips(linked, aux = []) {
                 : '<span class="lb-rel-badge lb-primary-badge" title="Primary lorebook"><i class="fa-solid fa-book-bookmark"></i></span>'}
             <button class="lb-linked-chip-x" data-action="${l.aux ? 'unlink-aux' : 'unlink-char'}" data-avatar="${esc(l.avatar)}" title="${l.aux ? `Remove this additional lorebook from ${esc(l.name)}` : `Unlink this lorebook from ${esc(l.name)}`}">&times;</button>
         </span>`).join('');
-    const more = rows.length > 8 ? `<button class="lb-linked-more" data-action="manage-links" title="See all ${rows.length} uses">+${rows.length - 8} more</button>` : '';
+    const more = rows.length > 8 ? `<button class="lb-linked-more" data-action="manage-char-links" title="See all ${rows.length} character links">+${rows.length - 8} more</button>` : '';
     return `<span class="lb-linked-chips">${chips}${more}</span>`;
 }
 
 // Chats-lens equivalent of renderLinkedChips: the chats bound to the current world.
 function renderBoundChatChips() {
+    if (chatIndexFailed) return `<span class="lb-meta-pill subtle"><i class="fa-solid fa-link-slash"></i> Couldn't load chat bindings</span>`;
     if (!chatIndexLoaded) return `<span class="lb-meta-pill subtle"><i class="fa-solid fa-spinner fa-spin"></i> Loading chats...</span>`;
     const bound = chatBoundMap.get(currentWorld) || [];
     if (!bound.length) return `<span class="lb-meta-pill subtle"><i class="fa-solid fa-link-slash"></i> No chats use this lorebook</span>`;
@@ -941,8 +951,13 @@ function renderBoundChatChips() {
             <button class="lb-linked-chip-x" data-action="unbind-chat" data-idx="${i}" title="Unbind this lorebook from the chat">&times;</button>
         </span>`;
     }).join('');
-    const more = bound.length > 8 ? `<button class="lb-linked-more" data-action="manage-links" title="See all ${bound.length} bound chats">+${bound.length - 8} more</button>` : '';
+    const more = bound.length > 8 ? `<button class="lb-linked-more" data-action="manage-chat-links" title="See all ${bound.length} bound chats">+${bound.length - 8} more</button>` : '';
     return `<span class="lb-linked-chips">${chips}${more}</span>`;
+}
+
+function renderRelationMeta() {
+    return renderLinkedChips(linkedMap.get(currentWorld) || [], auxMap.get(currentWorld) || [])
+        + renderBoundChatChips();
 }
 
 // ========================================
@@ -1726,16 +1741,18 @@ async function importFiles(fileList) {
 // LINK PICKER (characters: primary link, chats: chat-bound lore)
 // ========================================
 
-function openLinkPicker(initialMode = 'characters', { manage = false } = {}) {
+function openLinkPicker(initialMode = 'characters', { manage = false, auxManage = false } = {}) {
     if (!currentWorld) return;
     linkBook = currentWorld;
     linkMode = initialMode === 'chats' ? 'chats' : 'characters';
     linkManageMode = manage;
-    linkSelection = new Set();
+    linkAuxManage = auxManage && !manage && linkMode === 'characters';
     linkSearch = '';
     linkHideLinked = false;
-    linkAsAux = false;
+    linkAsAux = linkAuxManage;
     linkAuxSet = new Set((auxMap.get(linkBook) || []).map(a => a.avatar));
+    // Additional management starts from the current membership: check to keep, uncheck to remove.
+    linkSelection = linkAuxManage ? new Set(linkAuxSet) : new Set();
     linkPlaylistUid = '';
     linkPlaylistSet = null;
     linkChatChar = null;
@@ -1749,13 +1766,16 @@ function openLinkPicker(initialMode = 'characters', { manage = false } = {}) {
     const nameEl = document.getElementById('lbLinkBookName');
     if (nameEl) nameEl.textContent = currentWorld;
     const verbEl = document.getElementById('lbLinkVerb');
-    if (verbEl) verbEl.textContent = manage ? 'Manage links for' : 'Link';
+    if (verbEl) verbEl.textContent = linkAuxManage ? 'Additional for' : manage ? 'Manage links for' : linkMode === 'chats' ? 'Bind' : 'Link';
     const searchEl = document.getElementById('lbLinkSearch');
     if (searchEl) searchEl.value = '';
     const hideEl = document.getElementById('lbLinkHideLinked');
     if (hideEl) hideEl.checked = false;
     const auxEl = document.getElementById('lbLinkAsAux');
-    if (auxEl) auxEl.checked = false;
+    if (auxEl) auxEl.checked = linkAsAux;
+    if (linkAuxManage && !CoreAPI.canEditCharLore()) {
+        CoreAPI.showToast('Open the Library from SillyTavern to edit additional lorebooks', 'warning');
+    }
     populateLinkPlaylistFilter();
     document.getElementById('lbLinkHead')?.classList.remove('lb-toolbar-hidden', 'lb-pinned'); // start expanded + unpinned; a prior session may have left either
     syncLinkModeUI();
@@ -1772,7 +1792,9 @@ function setLinkApplyButton() {
     if (!btn) return;
     btn.classList.toggle('cl-btn-danger', linkManageMode);
     btn.classList.toggle('cl-btn-primary', !linkManageMode);
-    btn.innerHTML = linkManageMode
+    btn.innerHTML = linkAuxManage
+        ? `<i class="fa-solid fa-book-medical"></i> Update additional <span id="lbLinkApplyCount"></span>`
+        : linkManageMode
         ? `<i class="fa-solid fa-link-slash"></i> Unlink selected <span id="lbLinkApplyCount"></span>`
         : linkAsAux
             ? `<i class="fa-solid fa-plus"></i> Add as additional <span id="lbLinkApplyCount"></span>`
@@ -1793,7 +1815,13 @@ function syncLinkModeUI() {
     syncLinkPlaylistVisibility();
     // The additional toggle only makes sense when picking characters to add; it also
     // needs the ST window (the only charLore write path).
-    if (auxWrap) auxWrap.style.display = (linkMode === 'characters' && !linkManageMode && charLoreEditable) ? '' : 'none';
+    if (auxWrap) auxWrap.style.display = (linkMode === 'characters' && !linkManageMode && !linkAuxManage && charLoreEditable) ? '' : 'none';
+    if (linkAuxManage) {
+        if (hint) hint.innerHTML = `Checked characters keep <strong>${esc(linkBook)}</strong> as an <strong>additional</strong> lorebook. Uncheck to remove it. The primary lorebook on the card is not changed.`;
+        if (searchEl) searchEl.placeholder = 'Search characters...';
+        if (hideWrap) hideWrap.style.display = 'none';
+        return;
+    }
     if (linkManageMode) {
         const what = linkMode === 'chats' ? 'chats bound to' : 'characters using';
         if (hint) hint.innerHTML = `Select the ${what} <strong>${esc(linkBook)}</strong> to unlink, then Unlink selected. Primary and additional uses are both removed.`;
@@ -1812,8 +1840,8 @@ function syncLinkModeUI() {
     } else {
         if (hint) {
             hint.innerHTML = linkChatChar
-                ? `Bind <strong>${esc(linkBook)}</strong> to chats of <strong>${esc(linkChatChar.name || linkChatChar.avatar)}</strong> (writes to the chat, not the card).`
-                : `Pick a character, then choose which of their chats to bind <strong>${esc(linkBook)}</strong> to (writes to the chat, not the card).`;
+                ? `Bind <strong>${esc(linkBook)}</strong> to chats of <strong>${esc(linkChatChar.name || linkChatChar.avatar)}</strong>. One chat holds one lorebook. A chat that is open in SillyTavern is locked.`
+                : `Pick a character, then choose which of their chats to bind <strong>${esc(linkBook)}</strong> to. Group chats are not changed here.`;
         }
         if (searchEl) searchEl.placeholder = linkChatChar ? 'Search chats...' : 'Search characters...';
         if (hideWrap) hideWrap.style.display = 'none';
@@ -2007,6 +2035,26 @@ function manageChatVisible() {
     });
 }
 
+// The chat SillyTavern is appending to cannot be rewritten here (the save replaces the whole file).
+function chatOpenInSt(char, fileName) {
+    const target = String(fileName || '').replace(/\.jsonl$/i, '');
+    if (!target || !char?.avatar) return false;
+    try {
+        const ctx = CoreAPI.getHostWindow()?.SillyTavern?.getContext?.();
+        if (!ctx || ctx.groupId) return false;
+        const activeChar = ctx.characters?.[ctx.characterId];
+        if (!activeChar || activeChar.avatar !== char.avatar) return false;
+        const activeChat = String(ctx.chatId || ctx.getCurrentChatId?.() || '').replace(/\.jsonl$/i, '');
+        return !!activeChat && activeChat === target;
+    } catch {
+        return false;
+    }
+}
+
+function boundChatOpenInSt(c) {
+    return chatOpenInSt(c?.char || { avatar: c?.avatar, name: c?.charName }, c?.file_name);
+}
+
 // Manage-chats: every chat bound to this book, across characters (no per-char drill-down).
 function renderManageChatList(listEl) {
     clearVList(); // bounded list (one book's bound chats); render in full
@@ -2018,6 +2066,16 @@ function renderManageChatList(listEl) {
     listEl.innerHTML = items.map(c => {
         const key = `${c.avatar}:${c.file_name}`;
         const name = (c.file_name || '').replace(/\.jsonl$/i, '');
+        const locked = boundChatOpenInSt(c);
+        if (locked) {
+            return `
+            <button class="lb-link-row locked" data-action="link-chat-locked" title="Open in SillyTavern">
+                <i class="fa-solid fa-lock lb-link-chat-icon"></i>
+                <img class="lb-link-avatar" src="${esc(CoreAPI.getCharacterAvatarStThumbUrl(c.avatar))}" alt="" loading="lazy">
+                <span class="lb-link-name">${esc(c.charName)}: ${esc(name)}</span>
+                <span class="lb-link-status other">Open in SillyTavern</span>
+            </button>`;
+        }
         return `
             <button class="lb-link-row${linkSelection.has(key) ? ' selected' : ''}" data-action="link-toggle-managechat" data-key="${esc(key)}" title="${esc(name)}">
                 <span class="lb-link-check"><i class="fa-solid fa-check"></i></span>
@@ -2060,18 +2118,21 @@ function renderChatLinkList(listEl) {
         const file = ch.file_name;
         const name = (file || '').replace(/\.jsonl$/i, '');
         const cur = ch.chat_metadata?.world_info || '';
-        const selected = linkSelection.has(file);
+        const locked = chatOpenInSt(linkChatChar, file);
+        const selected = !locked && linkSelection.has(file);
         const isThis = cur === linkBook;
         const hasOther = cur && cur !== linkBook;
         const count = ch.chat_items || ch.mes_count || ch.message_count || 0;
-        const status = isThis
+        const status = locked
+            ? `<span class="lb-link-status other">Open in SillyTavern</span>`
+            : isThis
             ? `<span class="lb-link-status current"><i class="fa-solid fa-check"></i> Bound here</span>`
             : hasOther
                 ? `<span class="lb-link-status other" title="Currently bound to ${esc(cur)}"><i class="fa-solid fa-triangle-exclamation"></i> <span class="lb-link-status-name">${esc(cur)}</span></span>`
                 : '';
         return `
-            <button class="lb-link-row${selected ? ' selected' : ''}" data-action="link-toggle-chat" data-file="${esc(file)}" title="${esc(name)}">
-                <span class="lb-link-check"><i class="fa-solid fa-check"></i></span>
+            <button class="lb-link-row${selected ? ' selected' : ''}${locked ? ' locked' : ''}" data-action="${locked ? 'link-chat-locked' : 'link-toggle-chat'}" data-file="${esc(file)}" title="${esc(locked ? 'Open in SillyTavern' : name)}">
+                ${locked ? '<i class="fa-solid fa-lock lb-link-chat-icon"></i>' : '<span class="lb-link-check"><i class="fa-solid fa-check"></i></span>'}
                 <i class="fa-solid fa-message lb-link-chat-icon"></i>
                 <span class="lb-link-name">${esc(name)}</span>
                 <span class="lb-link-chat-count">${count} msg</span>
@@ -2114,8 +2175,16 @@ function updateLinkFooter() {
     if (countEl) countEl.textContent = `${linkSelection.size} selected`;
     const applyBtn = document.getElementById('lbLinkApplyBtn');
     const applyCount = document.getElementById('lbLinkApplyCount');
-    if (applyBtn) applyBtn.disabled = linkSelection.size === 0;
-    if (applyCount) applyCount.textContent = linkSelection.size ? `(${linkSelection.size})` : '';
+    if (linkAuxManage) {
+        const diff = auxSelectionDiff();
+        const n = diff.add + diff.remove;
+        if (applyBtn) applyBtn.disabled = n === 0 || !CoreAPI.canEditCharLore();
+        if (applyCount) applyCount.textContent = n ? `(+${diff.add} −${diff.remove})` : '';
+        if (countEl) countEl.textContent = `${linkSelection.size} kept`;
+    } else {
+        if (applyBtn) applyBtn.disabled = linkSelection.size === 0;
+        if (applyCount) applyCount.textContent = linkSelection.size ? `(${linkSelection.size})` : '';
+    }
     // The select toggle only makes sense on a list of selectable rows. Collapse it (display:none)
     // rather than just hiding it, so it doesn't reserve an empty gap above the list (the chats
     // pick-a-character step has no select-all).
@@ -2136,17 +2205,29 @@ function linkVisibleChats() {
 
 // Selection keys of the currently-shown rows (mode-aware: chars / per-char chats / manage-chats).
 // Reads the cached filtered set for characters, so it never re-filters/re-sorts the library.
+function selectableChatFiles() {
+    return linkVisibleChats().filter(ch => !chatOpenInSt(linkChatChar, ch.file_name)).map(ch => ch.file_name);
+}
+
 function linkShownKeys() {
-    if (linkManageMode && linkMode === 'chats') return manageChatVisible().map(c => `${c.avatar}:${c.file_name}`);
-    if (linkMode === 'chats') return linkVisibleChats().map(ch => ch.file_name);
+    if (linkManageMode && linkMode === 'chats') return manageChatVisible().filter(c => !boundChatOpenInSt(c)).map(c => `${c.avatar}:${c.file_name}`);
+    if (linkMode === 'chats') return selectableChatFiles();
     return linkFiltered.map(c => c.avatar);
 }
 
 // Cheap count of shown rows without materializing the key array (keeps the toggle O(1)).
 function linkShownCount() {
-    if (linkManageMode && linkMode === 'chats') return manageChatVisible().length;
-    if (linkMode === 'chats') return linkVisibleChats().length;
+    if (linkManageMode && linkMode === 'chats') return manageChatVisible().filter(c => !boundChatOpenInSt(c)).length;
+    if (linkMode === 'chats') return selectableChatFiles().length;
     return linkFiltered.length;
+}
+
+function auxSelectionDiff() {
+    let add = 0;
+    let remove = 0;
+    for (const avatar of linkSelection) if (!linkAuxSet.has(avatar)) add++;
+    for (const avatar of linkAuxSet) if (!linkSelection.has(avatar)) remove++;
+    return { add, remove };
 }
 
 function syncLinkSelectToggle() {
@@ -2161,7 +2242,9 @@ function syncLinkSelectToggle() {
 }
 
 async function applyLinks() {
-    if (!linkBook || linkSelection.size === 0) return;
+    if (!linkBook) return;
+    if (linkAuxManage) return applyAuxManage();
+    if (linkSelection.size === 0) return;
     if (linkManageMode) return applyUnlinks();
     if (linkMode === 'chats') return applyChatLinks();
     if (linkAsAux) return applyAuxLinks();
@@ -2299,6 +2382,65 @@ async function applyAuxLinks() {
     );
 }
 
+// Additional management: the checked set is the desired membership. Primary card links are not written.
+async function applyAuxManage() {
+    if (!CoreAPI.canEditCharLore()) {
+        CoreAPI.showToast('Open the Library from SillyTavern to edit additional lorebooks', 'warning');
+        return;
+    }
+    const book = linkBook;
+    const chars = CoreAPI.getAllCharacters() || [];
+    const had = new Set((auxMap.get(book) || []).map(a => a.avatar));
+    const toAdd = [...linkSelection].filter(a => !had.has(a));
+    const toRemove = [...had].filter(a => !linkSelection.has(a));
+    if (!toAdd.length && !toRemove.length) {
+        CoreAPI.showToast('No additional-lorebook changes', 'info');
+        return;
+    }
+    if (toRemove.length) {
+        const ok = await CoreAPI.showConfirm({
+            title: 'Update additional lorebooks?',
+            message: toAdd.length
+                ? `Add this lorebook for ${toAdd.length} character${toAdd.length === 1 ? '' : 's'} and remove it from ${toRemove.length}. The primary lorebook on each card stays as it is.`
+                : `Remove this lorebook from ${toRemove.length} ${toRemove.length === 1 ? "character's" : "characters'"} additional lorebooks? The primary lorebook on each card stays as it is.`,
+            confirmLabel: 'Update',
+            cancelLabel: 'Cancel',
+            danger: true,
+        });
+        if (!ok) return;
+    }
+
+    const applyBtn = document.getElementById('lbLinkApplyBtn');
+    const applyBtnHtml = applyBtn?.innerHTML;
+    if (applyBtn) { applyBtn.disabled = true; applyBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Updating...'; }
+
+    let added = 0;
+    let removed = 0;
+    try {
+        for (const avatar of toAdd) {
+            const c = chars.find(x => x.avatar === avatar);
+            if (c && await addAuxBookToChar(c, book)) added++;
+        }
+        for (const avatar of toRemove) {
+            const books = await CoreAPI.getCharAdditionalLorebooks(avatar);
+            const success = await CoreAPI.setCharAdditionalLorebooks(avatar, books.filter(b => b !== book));
+            if (!success) continue;
+            removed++;
+            linkAuxSet.delete(avatar);
+            const list = (auxMap.get(book) || []).filter(l => l.avatar !== avatar);
+            if (list.length) auxMap.set(book, list);
+            else auxMap.delete(book);
+        }
+    } finally {
+        if (applyBtn) { applyBtn.innerHTML = applyBtnHtml; applyBtn.disabled = false; }
+    }
+
+    if (linkBook === book) closeLinkPicker();
+    if (currentWorld) renderEditor();
+    renderWorldList();
+    CoreAPI.showToast(`Additional lorebook: added ${added}, removed ${removed}.`, 'success', 5000);
+}
+
 async function applyChatLinks() {
     if (!linkChatChar || linkSelection.size === 0) return;
     // Apply-time captures: the picker can be closed + reopened elsewhere mid-batch.
@@ -2327,6 +2469,7 @@ async function applyChatLinks() {
 
     const toBind = targets.filter(ch => {
         const cur = ch.chat_metadata?.world_info || '';
+        if (chatOpenInSt(chatChar, ch.file_name)) return false;
         if (cur === book) return false;
         if (skipConflicts && cur && cur !== book) return false;
         return true;
@@ -2407,7 +2550,7 @@ async function applyUnlinks() {
         if (isChat) {
             for (const key of linkSelection) {
                 const c = manageChatList.find(x => `${x.avatar}:${x.file_name}` === key);
-                if (!c) continue;
+                if (!c || boundChatOpenInSt(c)) continue;
                 const okU = await CoreAPI.setChatBoundWorld(c.char || { avatar: c.avatar, name: c.charName }, c.file_name, '');
                 if (okU) {
                     done++;
@@ -2640,6 +2783,11 @@ function attachEvents() {
         const back = e.target.closest('[data-action="link-chat-back"]');
         if (back) { backToCharPick(); return; }
 
+        if (e.target.closest('[data-action="link-chat-locked"]')) {
+            CoreAPI.showToast('This chat is currently open in SillyTavern. Switch away from it before changing its lorebook.', 'warning', 6000);
+            return;
+        }
+
         const charPick = e.target.closest('[data-action="link-pick-char"]');
         if (charPick) { pickLinkChatChar(charPick.dataset.avatar); return; }
 
@@ -2710,7 +2858,10 @@ function onContentClick(e) {
         case 'save': saveWorld(); break;
         case 'rename-world': startRename(); break;
         case 'link-chars': openLinkPicker('characters'); break;
+        case 'link-aux': openLinkPicker('characters', { auxManage: true }); break;
         case 'bind-chats': openLinkPicker('chats'); break;
+        case 'manage-char-links': openLinkPicker('characters', { manage: true }); break;
+        case 'manage-chat-links': openLinkPicker('chats', { manage: true }); break;
         case 'manage-links': openLinkPicker(usedByMode === 'chats' ? 'chats' : 'characters', { manage: true }); break;
         case 'duplicate-world': duplicateWorld(); break;
         case 'export-world': exportWorld(); break;

@@ -14,7 +14,7 @@ import CoreAPI from './core-api.js';
 // CSS LOADER
 // ========================================
 
-const MODULE_CSS_VERSION = 83;
+const MODULE_CSS_VERSION = 84;
 
 function loadModuleCSS(path) {
     return new Promise((resolve) => {
@@ -280,7 +280,7 @@ async function initModuleSystem() {
 
     try {
         loadModuleCSS('./lorebook-manager.css');
-        const lorebookModule = await import('./lorebook-manager.js');
+        const lorebookModule = await import(`./lorebook-manager.js?v=${MODULE_CSS_VERSION}`);
         ModuleLoader.register('lorebook-manager', lorebookModule.default);
 
         window.openLorebookManager = lorebookModule.openModal;
