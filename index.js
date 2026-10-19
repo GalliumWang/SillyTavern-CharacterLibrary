@@ -1034,7 +1034,7 @@ function syncTopBarFold() {
     syncFoldedLauncherHighlight();
 }
 
-// Always present on a wide top bar. Opens the lorebook manager in the embedded panel,
+// Always present on a wide top bar. Toggles the lorebook manager in the embedded panel,
 // including when the Characters button is hijacked and there is no separate library icon.
 function ensureLorebooksButton() {
     if (isNarrowTopBar()) {
@@ -1057,7 +1057,11 @@ function ensureLorebooksButton() {
         $btn.on('click', function(e) {
             e.preventDefault();
             e.stopPropagation();
-            openLorebooks();
+            if (_lorebooksOnly && isEmbeddedActive()) {
+                hideEmbedded();
+            } else {
+                openLorebooks();
+            }
         });
     }
     if (!placeTopBarDrawer($btn)) {
