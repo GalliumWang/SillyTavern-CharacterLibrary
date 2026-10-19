@@ -22209,7 +22209,6 @@ window.openBulkAutoLinkModal = openBulkAutoLinkModal;
 document.getElementById('bulkAutoLinkBtn')?.addEventListener('click', openBulkAutoLinkModal);
 document.getElementById('recommenderBtn')?.addEventListener('click', () => window.openRecommender?.());
 document.getElementById('creatorBtn')?.addEventListener('click', () => window.openCharacterCreator?.());
-document.getElementById('lorebooksBtn')?.addEventListener('click', () => window.openLorebookManager?.());
 document.getElementById('tagsManagerBtn')?.addEventListener('click', async () => {
     // First open imports the module + its CSS; cover the gap so it never paints half-built
     const cold = !window.ModuleLoader?.modules?.['tags-manager'];

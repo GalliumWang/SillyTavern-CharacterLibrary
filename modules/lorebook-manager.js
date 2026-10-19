@@ -404,7 +404,7 @@ function forceClose() {
     // Drop the chat reverse index (can be large); it rebuilds lazily on next Chats toggle.
     invalidateChatIndex();
     // Top-bar launch owns the whole embedded panel. Closing the manager returns to the chat.
-    // The in-library entry (⋮ → Lorebooks) leaves this class off, so it only hides the modal.
+    // Opening a linked world from character details leaves this class off, so it only hides the modal.
     if (returnToChat && window.parent && window.parent !== window) {
         window.parent.postMessage({ source: 'character-library', type: 'cl-close' }, window.location.origin);
     }
