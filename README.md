@@ -69,6 +69,7 @@ A powerful SillyTavern extension for discovering, organizing, and managing your 
 - **Default Filter Preset** in Settings to auto-apply one preset every time the library opens, so you land in your most-used view without re-applying filters.
 - **Character Creator** with built-in AI Studio for assisted card authoring, brainstorming, and iterative refinement
 - **Lorebook Manager** for browsing, editing, creating, importing, and exporting world files, with AI-assisted entry generation
+- **Lorebook folders** organize books into collapsible, single-level folders. Use the folder-plus button to create a folder and the folder button beside a book to move it. New books start in **Uncategorized**; folders, membership, and collapse states are saved per account. Deleting a folder moves its books back to Uncategorized.
 - **Custom CSS theming** with snippet management and an AI CSS Assistant that writes and iterates on styling for you
 - **Animated card info** on hover with configurable visibility options
 

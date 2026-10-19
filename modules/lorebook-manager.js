@@ -2,6 +2,7 @@
 // duplicate/import/export) via ST's /worldinfo helpers. Character-embedded books edit in the detail modal.
 
 import CoreAPI from './core-api.js';
+import FolderStore from './lorebook-folders.js?v=1';
 import { proxyEncode } from './providers/provider-utils.js';
 
 const esc = (s) => CoreAPI.escapeHtml(String(s ?? ''));
@@ -182,6 +183,9 @@ let worldSort = 'name';
 let entrySearch = '';
 let entrySort = 'order';
 let creatingNew = false;
+let folderLoadError = false;
+let organizeJob = null;
+let organizeBusy = false;
 
 const expandedUids = new Set();
 const advancedUids = new Set();
@@ -268,6 +272,7 @@ function createModal() {
                                 <option value="entries">Most entries</option>
                                 <option value="linked">Most linked</option>
                             </select>
+                            <button class="lb-icon-btn lb-new-folder-btn" id="lbNewFolderBtn" title="New folder" aria-label="New folder" disabled><i class="fa-solid fa-folder-plus"></i></button>
                         </div>
                     </div>
                     <div class="lb-world-list" id="lbWorldList"></div>
@@ -281,6 +286,26 @@ function createModal() {
                 </section>
             </div>
         </div>
+    </div>
+
+    <div id="lbOrganizeModal" class="cl-modal" role="dialog" aria-modal="true" aria-labelledby="lbOrganizeTitle">
+        <form class="cl-modal-content lb-organize-modal" id="lbOrganizeForm">
+            <div class="cl-modal-header">
+                <h3 id="lbOrganizeTitle">New folder</h3>
+                <button type="button" class="cl-modal-close" id="lbOrganizeCloseBtn" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="cl-modal-body">
+                <label for="lbOrganizeName" id="lbOrganizeNameLabel">Folder name</label>
+                <input id="lbOrganizeName" class="cl-input" type="text" maxlength="80" autocomplete="off">
+                <label for="lbOrganizeTarget" id="lbOrganizeTargetLabel">Folder</label>
+                <select id="lbOrganizeTarget" class="cl-input"></select>
+                <p class="lb-organize-hint" id="lbOrganizeHint"></p>
+            </div>
+            <div class="cl-modal-footer">
+                <button type="button" class="cl-btn cl-btn-secondary" id="lbOrganizeCancelBtn">Cancel</button>
+                <button type="submit" class="cl-btn cl-btn-primary" id="lbOrganizeApplyBtn">Create</button>
+            </div>
+        </form>
     </div>
 
     <div id="lbLinkModal" class="cl-modal">
@@ -373,6 +398,7 @@ function closeModal() {
 }
 
 function forceClose() {
+    closeOrganizeDialog();
     const returnToChat = document.documentElement.classList.contains('cl-lorebooks-only');
     document.getElementById('lorebookModal')?.classList.add('hidden');
     // Release the heavy buffers so a closed manager doesn't pin a full world file + string snapshot
@@ -426,6 +452,13 @@ function paintEditorUsedBy() {
 async function refreshList({ keepSelection = false } = {}) {
     // No first-load loader: the list paints as soon as the fetch resolves; the loading
     // animation was more distracting than the brief empty state it replaced.
+    try {
+        await FolderStore.load();
+        folderLoadError = false;
+    } catch (e) {
+        folderLoadError = true;
+        console.warn('[Lorebooks] Folder load failed', e);
+    }
     worldsList = await CoreAPI.listWorldInfoFiles();
     buildLinkedMap();
     await refreshAuxMap();
@@ -619,12 +652,63 @@ function renderBindingBadges(counts) {
     }).join('');
 }
 
+// The saved folder order is stable; the selected world sort applies within each folder.
+// Search expands only the matching groups without modifying their saved collapse state.
+function groupedWorlds(list = filteredSortedWorlds()) {
+    const groups = [...FolderStore.getFolders(), { id: '', name: 'Uncategorized' }]
+        .map(folder => ({ ...folder, worlds: [], total: 0,
+            expanded: !!worldSearch.trim() || !FolderStore.isCollapsed(folder.id) }));
+    const byId = new Map(groups.map(group => [group.id, group]));
+    for (const world of worldsList) (byId.get(FolderStore.folderFor(world.file_id)) || byId.get('')).total++;
+    for (const world of list) (byId.get(FolderStore.folderFor(world.file_id)) || byId.get('')).worlds.push(world);
+    return worldSearch.trim() ? groups.filter(group => group.worlds.length) : groups;
+}
+
+function visibleSortedWorlds() {
+    return groupedWorlds().filter(group => group.expanded).flatMap(group => group.worlds);
+}
+
+function renderWorldRow(w, q) {
+    const bindings = bindingCountsFor(w.file_id);
+    const count = entryCountOf(w);
+    const active = w.file_id === currentWorld ? ' active' : '';
+    const nameHit = q && w.file_id.toLowerCase().includes(q);
+    const nameHits = nameHit ? [] : matchedNamesFor(w.file_id, q);
+    const meta = [];
+    if (count === null) meta.push('...');
+    else meta.push(`${count} ${count === 1 ? 'entry' : 'entries'}`);
+    if (bindings.primary) meta.push(`${bindings.primary} primary`);
+    if (bindings.additional) meta.push(`${bindings.additional} additional`);
+    if (bindings.chats === null) meta.push(chatIndexFailed ? 'chats unavailable' : 'chats loading...');
+    else if (bindings.chats) meta.push(`${bindings.chats} chat${bindings.chats === 1 ? '' : 's'}`);
+    const viaLine = nameHits.length
+        ? `<span class="lb-world-via" title="${esc(nameHits.join(', '))}"><i class="fa-solid fa-magnifying-glass"></i> via ${esc(nameHits.join(', '))}</span>`
+        : '';
+    const badges = renderBindingBadges(bindings);
+    return `
+        <div class="lb-world-item">
+            <button class="lb-world-row${active}${nameHits.length ? ' char-match' : ''}" data-action="select-world" data-world="${esc(w.file_id)}" title="${esc(w.file_id)}">
+                <i class="fa-solid fa-book lb-world-icon"></i>
+                <span class="lb-world-info">
+                    <span class="lb-world-name">${esc(w.file_id)}</span>
+                    <span class="lb-world-meta">${meta.map(part => `<span>${esc(part)}</span>`).join('  ·  ')}</span>
+                    ${viaLine}
+                </span>
+                ${badges ? `<span class="lb-world-badges">${badges}</span>` : ''}
+            </button>
+            <button class="lb-folder-action lb-world-move" data-action="move-world" data-world="${esc(w.file_id)}" title="Move to folder" aria-label="Move ${esc(w.file_id)} to folder" ${FolderStore.isReady() ? '' : 'disabled'}><i class="fa-solid fa-folder-open"></i></button>
+        </div>`;
+}
+
 function renderWorldList() {
     const listEl = document.getElementById('lbWorldList');
     if (!listEl) return;
 
     const list = filteredSortedWorlds();
     let html = '';
+    const createFolderBtn = document.getElementById('lbNewFolderBtn');
+    if (createFolderBtn) createFolderBtn.disabled = !FolderStore.isReady();
+    if (folderLoadError) html += '<div class="lb-list-empty" role="status">Folders could not be loaded. Reopen Lorebooks to retry. Your lorebooks are still available.</div>';
 
     if (creatingNew) {
         html += `
@@ -641,34 +725,21 @@ function renderWorldList() {
     }
 
     const q = worldSearch.trim().toLowerCase();
-    for (const w of list) {
-        const bindings = bindingCountsFor(w.file_id);
-        const count = entryCountOf(w);
-        const active = w.file_id === currentWorld ? ' active' : '';
-        // Only flag a linked-character match when the query didn't already hit the book name (file_id).
-        const nameHit = q && w.file_id.toLowerCase().includes(q);
-        const nameHits = nameHit ? [] : matchedNamesFor(w.file_id, q);
-        const meta = [];
-        if (count === null) meta.push('...');
-        else meta.push(`${count} ${count === 1 ? 'entry' : 'entries'}`);
-        if (bindings.primary) meta.push(`${bindings.primary} primary`);
-        if (bindings.additional) meta.push(`${bindings.additional} additional`);
-        if (bindings.chats === null) meta.push(chatIndexFailed ? 'chats unavailable' : 'chats loading...');
-        else if (bindings.chats) meta.push(`${bindings.chats} chat${bindings.chats === 1 ? '' : 's'}`);
-        const viaLine = nameHits.length
-            ? `<span class="lb-world-via" title="${esc(nameHits.join(', '))}"><i class="fa-solid fa-magnifying-glass"></i> via ${esc(nameHits.join(', '))}</span>`
-            : '';
-        const badges = renderBindingBadges(bindings);
-        html += `
-            <button class="lb-world-row${active}${nameHits.length ? ' char-match' : ''}" data-action="select-world" data-world="${esc(w.file_id)}" title="${esc(w.file_id)}">
-                <i class="fa-solid fa-book lb-world-icon"></i>
-                <span class="lb-world-info">
-                    <span class="lb-world-name">${esc(w.file_id)}</span>
-                    <span class="lb-world-meta">${meta.map(part => `<span>${esc(part)}</span>`).join('  ·  ')}</span>
-                    ${viaLine}
-                </span>
-                ${badges ? `<span class="lb-world-badges">${badges}</span>` : ''}
-            </button>`;
+    for (const group of groupedWorlds(list)) {
+        const id = esc(group.id);
+        const count = q ? `${group.worlds.length} / ${group.total}` : group.total;
+        html += `<section class="lb-folder-group">
+            <div class="lb-folder-head">
+                <button class="lb-folder-toggle" data-action="toggle-folder" data-folder="${id}" aria-expanded="${group.expanded}" ${q || !FolderStore.isReady() ? 'disabled' : ''} title="${q ? 'Clear search to collapse folders' : esc(group.name)}">
+                    <i class="fa-solid fa-chevron-${group.expanded ? 'down' : 'right'} lb-folder-chevron" aria-hidden="true"></i>
+                    <i class="fa-solid fa-folder${group.expanded ? '-open' : ''}" aria-hidden="true"></i>
+                    <span class="lb-folder-name">${esc(group.name)}</span><span class="lb-folder-count">${count}</span>
+                </button>
+                ${group.id ? `<button class="lb-folder-action" data-action="rename-folder" data-folder="${id}" title="Rename folder" aria-label="Rename ${esc(group.name)}"><i class="fa-solid fa-pen"></i></button>
+                <button class="lb-folder-action" data-action="delete-folder" data-folder="${id}" title="Delete folder" aria-label="Delete ${esc(group.name)}"><i class="fa-solid fa-trash"></i></button>` : ''}
+            </div>
+            ${group.expanded ? `<div class="lb-folder-worlds">${group.worlds.map(w => renderWorldRow(w, q)).join('') || '<div class="lb-folder-empty">No lorebooks in this folder.</div>'}</div>` : ''}
+        </section>`;
     }
 
     listEl.innerHTML = html;
@@ -682,6 +753,96 @@ function renderWorldList() {
 // ========================================
 // CONTENT PANE
 // ========================================
+
+function closeOrganizeDialog() {
+    const modal = document.getElementById('lbOrganizeModal');
+    const wasVisible = modal?.classList.contains('visible');
+    modal?.classList.remove('visible');
+    organizeJob = null;
+    if (wasVisible) document.getElementById('lbNewFolderBtn')?.focus();
+}
+
+function openOrganizeDialog(type, value = '') {
+    if (!FolderStore.isReady() || organizeBusy) return;
+    const folder = FolderStore.getFolders().find(f => f.id === value);
+    if (type === 'rename' && !folder) return;
+    organizeJob = { type, value };
+    const moving = type === 'move';
+    document.getElementById('lbOrganizeTitle').textContent = moving ? 'Move lorebook' : type === 'rename' ? 'Rename folder' : 'New folder';
+    const name = document.getElementById('lbOrganizeName');
+    name.value = folder?.name || '';
+    name.required = !moving;
+    for (const id of ['lbOrganizeName', 'lbOrganizeNameLabel']) document.getElementById(id).classList.toggle('hidden', moving);
+    for (const id of ['lbOrganizeTarget', 'lbOrganizeTargetLabel']) document.getElementById(id).classList.toggle('hidden', !moving);
+    const target = document.getElementById('lbOrganizeTarget');
+    target.innerHTML = '<option value="">Uncategorized</option>' + FolderStore.getFolders()
+        .map(f => `<option value="${esc(f.id)}">${esc(f.name)}</option>`).join('');
+    target.value = moving ? FolderStore.folderFor(value) : '';
+    document.getElementById('lbOrganizeHint').textContent = moving ? `Move "${value}" to the selected folder. Its bindings stay the same.` : '';
+    const apply = document.getElementById('lbOrganizeApplyBtn');
+    apply.textContent = moving ? 'Move' : type === 'rename' ? 'Rename' : 'Create';
+    apply.disabled = false;
+    document.getElementById('lbOrganizeModal').classList.add('visible');
+    const job = organizeJob;
+    requestAnimationFrame(() => {
+        if (organizeJob !== job) return;
+        (moving ? target : name).focus();
+        if (!moving) name.select();
+    });
+}
+
+async function applyOrganization() {
+    if (!organizeJob || organizeBusy) return;
+    const job = organizeJob;
+    const name = document.getElementById('lbOrganizeName').value;
+    const target = document.getElementById('lbOrganizeTarget').value;
+    organizeBusy = true;
+    const apply = document.getElementById('lbOrganizeApplyBtn');
+    apply.disabled = true;
+    try {
+        if (job.type === 'create') {
+            await FolderStore.createFolder(name);
+            worldSearch = '';
+            document.getElementById('lbWorldSearch').value = '';
+        }
+        else if (job.type === 'rename') await FolderStore.renameFolder(job.value, name);
+        else {
+            if (!worldsList.some(w => w.file_id === job.value)) throw new Error('Lorebook no longer exists');
+            await FolderStore.moveWorld(job.value, target);
+        }
+        if (organizeJob === job) closeOrganizeDialog();
+        renderWorldList();
+    } catch (e) {
+        CoreAPI.showToast(e.message || 'Could not save folders. Please try again.', 'error');
+    } finally {
+        organizeBusy = false;
+        apply.disabled = false;
+    }
+}
+
+async function deleteLorebookFolder(id) {
+    const folder = FolderStore.getFolders().find(f => f.id === id);
+    if (!folder) return;
+    const count = worldsList.filter(w => FolderStore.folderFor(w.file_id) === id).length;
+    const ok = await CoreAPI.showConfirm({
+        title: 'Delete folder?',
+        message: `Delete "${esc(folder.name)}"? Its ${count} lorebook${count === 1 ? '' : 's'} will move to Uncategorized.`,
+        confirmLabel: 'Delete folder', cancelLabel: 'Cancel',
+    });
+    if (!ok) return;
+    try {
+        await FolderStore.deleteFolder(id);
+        renderWorldList();
+    } catch (e) { CoreAPI.showToast(e.message || 'Could not delete folder', 'error'); }
+}
+
+async function toggleLorebookFolder(id) {
+    if (worldSearch.trim()) return;
+    try {
+        await FolderStore.toggleFolder(id);
+        renderWorldList();
+    } catch (e) { CoreAPI.showToast(e.message || 'Could not save folder state', 'error'); }
+}
 
 // Mobile: toggle a class on .lb-body so CSS can swap between the world list and the editor.
 function setEditingMode(on) {
@@ -733,6 +894,11 @@ async function selectWorld(fileId) {
     diskSnapshot = JSON.stringify(data);
     if (!data.entries || typeof data.entries !== 'object') data.entries = {};
 
+    const folder = FolderStore.folderFor(fileId);
+    if (FolderStore.isReady() && FolderStore.isCollapsed(folder)) {
+        try { await FolderStore.toggleFolder(folder); }
+        catch { /* The editor can still open if saving the expanded state fails. */ }
+    }
     currentWorld = fileId;
     workingWorld = JSON.parse(JSON.stringify(data));
     // Key-canonical uid repair: handlers find entries via the body uid, but third-party files
@@ -776,7 +942,7 @@ function lbNavAllowed() {
 // Up/down load the prev/next lorebook (clamped; first press picks an end); selectWorld owns the
 // unsaved-edits guard. After it switches, keep the now-active sidebar row in view.
 function moveActiveWorld(dir) {
-    const worlds = filteredSortedWorlds();
+    const worlds = visibleSortedWorlds();
     if (!worlds.length) return;
     let idx = worlds.findIndex(w => w.file_id === currentWorld);
     if (idx === -1) idx = dir > 0 ? 0 : worlds.length - 1;
@@ -1457,6 +1623,8 @@ async function doRename(oldName, newName) {
     const ok = await CoreAPI.renameWorldInfo(oldName, newName);
     if (!ok) { CoreAPI.showToast('Rename failed', 'error'); renderEditor(); return; }
     currentWorld = newName;
+    try { await FolderStore.renameWorld(oldName, newName); }
+    catch { CoreAPI.showToast('Lorebook renamed, but its folder could not be updated. Move it to the folder again.', 'warning'); }
 
     // Additional-book references (charLore) auto-sweep like ST's own rename does; no confirm.
     // null = bridge unreachable, so surviving references get a caveat instead.
@@ -1470,7 +1638,7 @@ async function doRename(oldName, newName) {
     // Chat-bound links (chat_metadata.world_info) aren't swept on rename; the success toast warns
     // the user to rebind. Suppressed only when the Chats index is built and shows zero (no scan here).
     const knownZeroChats = chatIndexLoaded && !(chatBoundMap.get(oldName) || []).length;
-    const chatCaveat = (knownZeroChats ? '' : ' Bound chats keep the old name, rebind from the Chats lens.') + auxNote;
+    const chatCaveat = (knownZeroChats ? '' : ' Bound chats keep the old name, rebind using Chats.') + auxNote;
 
     // Re-point primary character links (data.extensions.world) from old to new name.
     if (linkedBefore.length) {
@@ -1561,6 +1729,8 @@ async function deleteWorld() {
 
     const done = await CoreAPI.deleteWorldInfo(deletedName);
     if (!done) { CoreAPI.showToast('Delete failed', 'error'); return; }
+    try { await FolderStore.removeWorld(deletedName); }
+    catch { CoreAPI.showToast('Lorebook deleted, but its saved folder assignment could not be cleared.', 'warning'); }
 
     let cleared = 0;
     if (clearLinks) {
@@ -2674,6 +2844,15 @@ function attachEvents() {
     });
 
     document.getElementById('lbNewBtn')?.addEventListener('click', startCreate);
+    document.getElementById('lbNewFolderBtn')?.addEventListener('click', () => openOrganizeDialog('create'));
+    for (const id of ['lbOrganizeCloseBtn', 'lbOrganizeCancelBtn']) document.getElementById(id)?.addEventListener('click', closeOrganizeDialog);
+    document.getElementById('lbOrganizeForm')?.addEventListener('submit', e => { e.preventDefault(); applyOrganization(); });
+    document.getElementById('lbOrganizeModal')?.addEventListener('click', e => {
+        if (e.target.id === 'lbOrganizeModal') closeOrganizeDialog();
+    });
+    document.getElementById('lbOrganizeModal')?.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeOrganizeDialog(); }
+    });
     // "New" is a split button: the caret reveals secondary create actions (Generate with AI).
     document.getElementById('lbNewCaret')?.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -2705,8 +2884,15 @@ function attachEvents() {
 
     // Sidebar delegation (world rows + inline new-name input)
     document.getElementById('lbWorldList')?.addEventListener('click', (e) => {
-        const row = e.target.closest('[data-action="select-world"]');
-        if (row) selectWorld(row.dataset.world);
+        const button = e.target.closest('[data-action]');
+        if (!button) return;
+        switch (button.dataset.action) {
+            case 'select-world': selectWorld(button.dataset.world); break;
+            case 'toggle-folder': toggleLorebookFolder(button.dataset.folder); break;
+            case 'rename-folder': openOrganizeDialog('rename', button.dataset.folder); break;
+            case 'delete-folder': deleteLorebookFolder(button.dataset.folder); break;
+            case 'move-world': openOrganizeDialog('move', button.dataset.world); break;
+        }
     });
     document.getElementById('lbWorldList')?.addEventListener('keydown', (e) => {
         if (e.target.id === 'lbNewNameInput') {
@@ -4589,6 +4775,11 @@ function init() {
     // Register overlays so Escape and Android back close them (picker first, then manager).
     if (!eventsAttached) {
         eventsAttached = true;
+        window.registerOverlay?.({
+            id: 'lbOrganizeModal', tier: 6,
+            close: closeOrganizeDialog,
+            visible: el => el.classList.contains('visible'),
+        });
         window.registerOverlay?.({
             id: 'lbLinkModal',
             tier: 6,

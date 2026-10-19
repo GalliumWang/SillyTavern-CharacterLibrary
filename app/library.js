@@ -8350,6 +8350,9 @@ function flushLorebooksOpen() {
 function suspendLorebooksToLibrary() {
     _pendingLorebooksOpen = null;
     setLorebooksOnlyMode(false);
+    if (document.getElementById('lbOrganizeModal')?.classList.contains('visible')) {
+        document.getElementById('lbOrganizeCancelBtn')?.click();
+    }
     document.getElementById('lorebookModal')?.classList.add('hidden');
 }
 

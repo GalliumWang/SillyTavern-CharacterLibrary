@@ -13,6 +13,10 @@ const source = fs.readFileSync(path.join(__dirname, '../modules/lorebook-manager
 function harness(overrides = {}) {
     const list = { innerHTML: '' };
     const context = vm.createContext({
+        FolderStore: {
+            load: async () => {}, isReady: () => true,
+            getFolders: () => [], folderFor: () => '', isCollapsed: () => false,
+        },
         CoreAPI: {
             escapeHtml: s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])),
             getAllCharacters: () => [],
@@ -153,4 +157,43 @@ test('filenames and matched names remain escaped in the rendered row', () => {
     h.run(`worldsList = [{file_id:'<img onerror="bad">'}]; worldSearch = ''; renderWorldList()`);
     assert.doesNotMatch(h.list.innerHTML, /<img/);
     assert.match(h.list.innerHTML, /&lt;img/);
+});
+
+test('folder groups preserve a single membership, counts and within-folder sorting', () => {
+    const h = harness();
+    Object.assign(h.context.FolderStore, {
+        getFolders: () => [{ id: 'one', name: 'Characters' }, { id: 'two', name: 'Rules' }],
+        folderFor: world => ['Alpha', 'Shared'].includes(world) ? 'one' : world === 'Beta' ? 'two' : '',
+    });
+    h.run("worldsList.push({file_id:'Alpha'}, {file_id:'Beta'}, {file_id:'Unsorted'}); worldSort = 'name_desc'");
+    assert.deepEqual(h.json('groupedWorlds().map(g => [g.name, g.total, g.worlds.map(w => w.file_id)])'), [
+        ['Characters', 2, ['Shared', 'Alpha']], ['Rules', 1, ['Beta']], ['Uncategorized', 1, ['Unsorted']],
+    ]);
+    h.run('renderWorldList()');
+    assert.equal((h.list.innerHTML.match(/data-action="select-world"/g) || []).length, 4);
+});
+
+test('collapsed groups hide rows and keyboard targets; search expands matches without changing saved state', () => {
+    const h = harness();
+    Object.assign(h.context.FolderStore, {
+        getFolders: () => [{ id: 'one', name: 'Characters' }],
+        folderFor: () => 'one', isCollapsed: id => id === 'one',
+    });
+    h.run('renderWorldList()');
+    assert.doesNotMatch(h.list.innerHTML, /data-action="select-world"/);
+    assert.deepEqual(h.json('visibleSortedWorlds()'), []);
+    h.run("worldSearch = 'bob'; renderWorldList()");
+    assert.match(h.list.innerHTML, /data-action="select-world"/);
+    assert.deepEqual(h.json('visibleSortedWorlds().map(w => w.file_id)'), ['Shared']);
+    h.run("worldSearch = ''; renderWorldList()");
+    assert.doesNotMatch(h.list.innerHTML, /data-action="select-world"/);
+});
+
+test('folder names are escaped and Uncategorized has no rename or delete controls', () => {
+    const h = harness();
+    h.context.FolderStore.getFolders = () => [{ id: 'one', name: '<img onerror="bad">' }];
+    h.run('renderWorldList()');
+    assert.doesNotMatch(h.list.innerHTML, /<img/);
+    assert.match(h.list.innerHTML, /&lt;img/);
+    assert.doesNotMatch(h.list.innerHTML, /data-action="(?:delete|rename)-folder" data-folder=""/);
 });

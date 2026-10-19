@@ -139,6 +139,77 @@
     line-height: 1.6;
 }
 
+.lb-new-folder-btn {
+    flex-shrink: 0;
+    align-self: stretch;
+    height: auto;
+    min-height: 34px;
+}
+
+.lb-folder-group,
+.lb-folder-worlds {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2xs);
+}
+
+.lb-folder-group { margin-bottom: var(--space-sm); }
+.lb-folder-worlds { padding-left: var(--space-xs); }
+.lb-folder-head,
+.lb-world-item { display: flex; align-items: center; gap: var(--space-2xs); }
+
+.lb-folder-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs-sm);
+    flex: 1;
+    min-width: 0;
+    min-height: 36px;
+    padding: var(--space-xs);
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: var(--font-xs);
+    text-align: left;
+    cursor: pointer;
+}
+.lb-folder-toggle:disabled { cursor: default; opacity: 1; }
+.lb-folder-toggle:hover:not(:disabled) { background: rgba(255, 255, 255, 0.05); }
+.lb-folder-chevron { font-size: var(--font-3xs); width: 10px; flex-shrink: 0; }
+.lb-folder-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1; }
+.lb-folder-count { color: var(--text-muted); font-size: var(--font-2xs); white-space: nowrap; }
+.lb-folder-empty { color: var(--text-muted); font-size: var(--font-2xs); padding: var(--space-sm); }
+
+.lb-folder-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    min-height: 32px;
+    flex-shrink: 0;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: var(--font-2xs);
+    cursor: pointer;
+}
+.lb-folder-action:hover:not(:disabled) { background: rgba(var(--accent-rgb), 0.15); color: var(--accent); }
+.lb-folder-action:disabled { opacity: 0.35; cursor: default; }
+.lb-world-item .lb-world-row { flex: 1; min-width: 0; width: auto; }
+
+.cl-modal-content.lb-organize-modal { max-width: 420px; }
+.lb-organize-modal label { margin-bottom: var(--space-sm); color: var(--text-secondary); }
+.lb-organize-modal label:not(.hidden) { display: block; }
+.lb-organize-modal .cl-input { width: 100%; }
+.lb-organize-hint { color: var(--text-muted); overflow-wrap: anywhere; margin: var(--space-md) 0 0; }
+.lb-organize-hint:empty { display: none; }
+
+html.cl-mobile .lb-folder-toggle,
+html.cl-mobile .lb-folder-action { min-height: 44px; }
+html.cl-mobile .lb-folder-action { width: 32px; }
+
 .lb-world-row {
     display: flex;
     align-items: center;
