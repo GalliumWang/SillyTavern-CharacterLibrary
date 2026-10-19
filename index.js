@@ -161,6 +161,24 @@ function getExclusivePanes() {
     } catch { return false; }
 }
 
+function getTopBarButtonVisible(key) {
+    try {
+        return SillyTavern?.getContext?.()?.extensionSettings?.[CL_SETTINGS_KEY]?.[key] !== false;
+    } catch { return true; }
+}
+
+function setTopBarButtonVisible(key, visible) {
+    try {
+        const context = SillyTavern?.getContext?.();
+        if (!context?.extensionSettings) return;
+        if (!context.extensionSettings[CL_SETTINGS_KEY]) context.extensionSettings[CL_SETTINGS_KEY] = {};
+        context.extensionSettings[CL_SETTINGS_KEY][key] = !!visible;
+        context.saveSettingsDebounced?.();
+    } catch (e) {
+        console.warn(`${EXTENSION_NAME}: Failed to save ${key}:`, e);
+    }
+}
+
 function setExclusivePanes(enabled) {
     try {
         const context = SillyTavern?.getContext?.();
@@ -234,7 +252,7 @@ function setLorebooksHighlight(active) {
 
 // On a narrow top bar the gallery icon stands in for both panels.
 function syncFoldedLauncherHighlight() {
-    if (!isNarrowTopBar() || getShowDropdownInEmbedded()) return;
+    if (!usesFoldedGalleryLauncher()) return;
     setDrawerIconHighlight('#st-gallery-btn', _embeddedVisible);
 }
 
@@ -376,6 +394,15 @@ function openLibraryFromLauncher() {
         return;
     }
     openGallery();
+}
+
+// Settings actions always open the requested module, even if its top-bar icon is hidden
+// or the library is already visible. Direct icon clicks retain their toggle behavior.
+function openLibraryFromSettings() {
+    if (getDisplayMode() !== 'embedded') { openGallery(); return; }
+    _lorebooksOnly = false;
+    deliverToIframe({ type: 'cl-show-library' });
+    showEmbedded();
 }
 
 function openLorebooks() {
@@ -821,6 +848,7 @@ function setupLauncherDropdown() {
  * button can't be found for hijacking.
  */
 function ensureStandaloneGalleryButton(shouldExist) {
+    shouldExist = shouldExist && getTopBarButtonVisible('showLibraryButton');
     const existing = document.getElementById('st-gallery-btn');
     if (!shouldExist) {
         if (existing) existing.remove();
@@ -847,7 +875,7 @@ function ensureStandaloneGalleryButton(shouldExist) {
         e.preventDefault();
         e.stopPropagation();
         // Narrow screens have no room for a second icon. This button opens the menu.
-        if (isNarrowTopBar() && !getShowDropdownInEmbedded()) toggleGalleryLauncher();
+        if (usesFoldedGalleryLauncher()) toggleGalleryLauncher();
         else openGallery();
     });
 
@@ -923,6 +951,21 @@ const narrowTopBarQuery = window.matchMedia('(max-width: 1000px)');
 
 function isNarrowTopBar() {
     return narrowTopBarQuery.matches;
+}
+
+function hasCharactersLauncher() {
+    return getShowDropdownInEmbedded() && !!document.getElementById('charlib-launcher-dropdown');
+}
+
+function usesFoldedGalleryLauncher() {
+    return isNarrowTopBar() && !hasCharactersLauncher()
+        && getTopBarButtonVisible('showLibraryButton') && getTopBarButtonVisible('showLorebooksButton');
+}
+
+function syncTopBarButtons() {
+    hideGalleryLauncher();
+    ensureStandaloneGalleryButton(!hasCharactersLauncher());
+    syncTopBarFold();
 }
 
 let _galleryLauncherOpen = false;
@@ -1022,22 +1065,24 @@ function syncGalleryChevron(show) {
     icon.title = 'Character Library and Lorebooks';
 }
 
-// Phone: one icon. Characters-button dropdown gets a Lorebooks row; otherwise the
-// Character Library icon opens a two-item menu. Desktop keeps two separate icons.
+// Phone: combine enabled modules only when both are shown. A single enabled module
+// gets its own direct button. The optional Characters dropdown remains independent.
 function syncTopBarFold() {
     const narrow = isNarrowTopBar();
-    const charactersMenu = getShowDropdownInEmbedded() && !!document.getElementById('charlib-launcher-dropdown');
-    if (narrow) $('#st-lorebooks-btn').remove();
-    ensureCharactersLorebooksItem(narrow && charactersMenu);
-    if (!narrow || charactersMenu) hideGalleryLauncher();
-    syncGalleryChevron(narrow && !charactersMenu && !!document.getElementById('st-gallery-btn'));
+    const charactersMenu = hasCharactersLauncher();
+    const showLorebooks = getTopBarButtonVisible('showLorebooksButton');
+    const folded = narrow && getTopBarButtonVisible('showLibraryButton') && showLorebooks;
+    if (folded || !showLorebooks) $('#st-lorebooks-btn').remove();
+    ensureCharactersLorebooksItem(folded && charactersMenu);
+    if (!usesFoldedGalleryLauncher()) hideGalleryLauncher();
+    syncGalleryChevron(usesFoldedGalleryLauncher() && !!document.getElementById('st-gallery-btn'));
     syncFoldedLauncherHighlight();
 }
 
-// Always present on a wide top bar. Toggles the lorebook manager in the embedded panel,
-// including when the Characters button is hijacked and there is no separate library icon.
+// Enabled on desktop and when it is the sole enabled module on a narrow top bar.
 function ensureLorebooksButton() {
-    if (isNarrowTopBar()) {
+    if (!getTopBarButtonVisible('showLorebooksButton')
+        || (isNarrowTopBar() && getTopBarButtonVisible('showLibraryButton'))) {
         $('#st-lorebooks-btn').remove();
         syncTopBarFold();
         return;
@@ -1110,6 +1155,23 @@ function injectExtensionSettings() {
                             <option value="embedded"${currentMode === 'embedded' ? ' selected' : ''}>Embedded Panel</option>
                         </select>
                     </div>
+                    <div style="margin: 8px 0; padding: 8px 0; border-top: 1px solid rgba(255,255,255,0.1); border-bottom: 1px solid rgba(255,255,255,0.1);">
+                        <div style="display: flex; align-items: center; gap: 8px; padding: 4px 0;">
+                            <label style="display: flex; align-items: center; gap: 8px; flex: 1; cursor: pointer;" title="Show the separate Character Library top-bar icon. The optional Characters launcher dropdown is controlled separately.">
+                                <input type="checkbox" id="charlib-show-library-button"${getTopBarButtonVisible('showLibraryButton') ? ' checked' : ''} />
+                                <span>Show Character Library button</span>
+                            </label>
+                            <button type="button" id="charlib-open-library" class="menu_button" style="white-space: nowrap;" aria-label="Open Character Library" title="Open Character Library">Open</button>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 8px; padding: 4px 0;">
+                            <label style="display: flex; align-items: center; gap: 8px; flex: 1; cursor: pointer;" title="Show the Lorebooks top-bar icon, or its entry in the combined mobile launcher.">
+                                <input type="checkbox" id="charlib-show-lorebooks-button"${getTopBarButtonVisible('showLorebooksButton') ? ' checked' : ''} />
+                                <span>Show Lorebooks button</span>
+                            </label>
+                            <button type="button" id="charlib-open-lorebooks" class="menu_button" style="white-space: nowrap;" aria-label="Open Lorebooks" title="Open Lorebooks">Open</button>
+                        </div>
+                        <div style="opacity: 0.65; font-size: 11px; margin-top: 4px; line-height: 1.4;">Open either module here, even with its top-bar button hidden. On phones, both enabled modules share a launcher.</div>
+                    </div>
                     <label style="display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer;" title="When on, clicking SillyTavern's Characters icon opens a dropdown to pick between Character Management and Character Library. When off, the Characters icon behaves normally and a separate Character Library button is added to the top bar.">
                         <input type="checkbox" id="charlib-show-dropdown"${getShowDropdownInEmbedded() ? ' checked' : ''} />
                         <span>Show launcher dropdown on Characters button</span>
@@ -1142,6 +1204,23 @@ function injectExtensionSettings() {
 
         container.appendChild(panel);
 
+        document.getElementById('charlib-show-library-button').addEventListener('change', e => {
+            setTopBarButtonVisible('showLibraryButton', e.target.checked);
+            syncTopBarButtons();
+        });
+        document.getElementById('charlib-show-lorebooks-button').addEventListener('change', e => {
+            setTopBarButtonVisible('showLorebooksButton', e.target.checked);
+            syncTopBarButtons();
+        });
+        document.getElementById('charlib-open-library').addEventListener('click', () => {
+            closeAllSTDrawers();
+            openLibraryFromSettings();
+        });
+        document.getElementById('charlib-open-lorebooks').addEventListener('click', () => {
+            closeAllSTDrawers();
+            openLorebooks();
+        });
+
         document.getElementById('charlib-launch-on-boot').addEventListener('change', (e) => {
             setLaunchOnBoot(e.target.checked);
         });
@@ -1161,8 +1240,7 @@ function injectExtensionSettings() {
             setShowDropdownInEmbedded(e.target.checked);
             const chev = document.querySelector('#rightNavDrawerIcon .charlib-chevron-badge');
             if (chev) chev.style.display = e.target.checked ? '' : 'none';
-            ensureStandaloneGalleryButton(!e.target.checked);
-            syncTopBarFold();
+            syncTopBarButtons();
         });
 
         document.getElementById('charlib-exclusive-panes').addEventListener('change', (e) => {
@@ -1266,18 +1344,11 @@ jQuery(async () => {
     injectExtensionSettings();
 
     // Try to hijack ST's Characters button with a launcher dropdown
-    const hijacked = setupLauncherDropdown();
-
-    // When the dropdown is disabled (or the hijack failed), add a separate CL button
-    // to the top bar so users still have a way to reach the library.
-    if (!hijacked || !getShowDropdownInEmbedded()) {
-        ensureStandaloneGalleryButton(true);
-    }
-    ensureLorebooksButton();
+    setupLauncherDropdown();
+    syncTopBarButtons();
     if (typeof narrowTopBarQuery.addEventListener === 'function') {
         narrowTopBarQuery.addEventListener('change', () => {
-            hideGalleryLauncher();
-            ensureLorebooksButton();
+            syncTopBarButtons();
         });
     }
     

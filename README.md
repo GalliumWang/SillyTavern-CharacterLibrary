@@ -110,7 +110,11 @@ Character Library can run in two modes, configurable in SillyTavern's **Extensio
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| **Show Character Library button** | On | Show the separate Character Library top-bar icon. Applies when the optional Characters launcher dropdown is off or unavailable. |
+| **Show Lorebooks button** | On | Show the Lorebooks top-bar icon, or its entry in the combined mobile launcher. |
 | **Show launcher dropdown on Characters button** | Off | When off, a separate Character Library icon is added to SillyTavern's top bar and the Characters button behaves normally. When on, the Characters button is hijacked: clicking it opens a small dropdown to choose between SillyTavern's native character manager and Character Library. |
+
+Each module also has an **Open** button in these settings, available even when its top-bar icon is hidden. Visibility changes apply immediately and are saved. On phones, both enabled modules share a launcher; if only one is enabled, it gets a direct button.
 
 ### Embedded Panel Settings
 
