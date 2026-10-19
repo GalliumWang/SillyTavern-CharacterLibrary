@@ -164,14 +164,12 @@ let linkedMap = new Map();    // file_id -> [{ avatar, name, char }]  (character
 let auxMap = new Map();
 let charLoreEditable = false; // ST window reachable -> additional-book writes possible
 
-// "Used by" lens: 'characters' (card extensions.world) | 'chats' (chat_metadata.world_info).
-// Governs the sidebar badges + sort and the editor's usage section. Per manager session.
-let usedByMode = 'characters';
 // world file_id -> [{ avatar, charName, char, file_name }] of chats bound to it.
 let chatBoundMap = new Map();
 let chatIndexLoaded = false;     // has the reverse index been built this session?
 let chatIndexLoading = false;
 let chatIndexFailed = false;
+let chatIndexToken = 0;       // ignore an index request from a closed manager session
 
 let currentWorld = null;      // file_id of the open world
 let workingWorld = null;      // deep-cloned working copy { entries: {...}, ... }
@@ -261,13 +259,9 @@ function createModal() {
                     <div class="lb-sidebar-tools">
                         <div class="lb-search-wrap">
                             <i class="fa-solid fa-magnifying-glass"></i>
-                            <input type="search" id="lbWorldSearch" class="cl-input" placeholder="Search lorebooks or characters..." autocomplete="off">
+                            <input type="search" id="lbWorldSearch" class="cl-input" placeholder="Search lorebooks, characters, chats..." autocomplete="off">
                         </div>
                         <div class="lb-tools-row">
-                            <div class="lb-usedby-seg" role="group" aria-label="Used-by view">
-                                <button class="lb-usedby-opt active" data-action="usedby-mode" data-mode="characters" title="Used by characters (primary links)" aria-label="Used by characters"><i class="fa-solid fa-user"></i></button>
-                                <button class="lb-usedby-opt" data-action="usedby-mode" data-mode="chats" title="Used by chats (chat-bound)" aria-label="Used by chats"><i class="fa-solid fa-comment-dots"></i></button>
-                            </div>
                             <select id="lbWorldSort" class="lb-sort-select">
                                 <option value="name">Name A-Z</option>
                                 <option value="name_desc">Name Z-A</option>
@@ -354,10 +348,6 @@ async function openModal(focusWorld) {
         if (sortSel) CoreAPI.initCustomSelect(sortSel);
     }
     modal.classList.remove('hidden');
-    // Keep whichever used-by lens was last open. The toggle DOM is created with Characters active.
-    document.querySelectorAll('.lb-usedby-opt').forEach(b => b.classList.toggle('active', b.dataset.mode === usedByMode));
-    const wsEl = document.getElementById('lbWorldSearch');
-    if (wsEl) wsEl.placeholder = usedByMode === 'chats' ? 'Search lorebooks or chats...' : 'Search lorebooks or characters...';
     // focusWorld may arrive as an event object when wired directly to a listener; ignore non-strings.
     const target = typeof focusWorld === 'string' ? focusWorld : null;
     await refreshList({ keepSelection: !target });
@@ -366,7 +356,6 @@ async function openModal(focusWorld) {
     } else if (target) {
         CoreAPI.showToast(`Lorebook "${target}" not found`, 'warning');
     }
-    if (usedByMode === 'chats') ensureChatIndex();
 }
 
 function closeModal() {
@@ -448,6 +437,7 @@ async function refreshList({ keepSelection = false } = {}) {
         renderEmptyContent();
     }
     backfillEntryCounts();
+    ensureChatIndex();
 }
 
 // Lazily fetch entry counts for worlds we haven't counted yet, a few at a time, so the
@@ -517,31 +507,31 @@ function entryCountOf(world) {
     return entryCountCache.has(world.file_id) ? entryCountCache.get(world.file_id) : null;
 }
 
-// "Used by" count for a world under the active lens. Characters: char-link count (in memory).
-// Chats: chat-bind count from the reverse index (null until the index is built -> shows "...").
+// Count relationships separately: a character can use a book as both primary and additional.
+function bindingCountsFor(fileId) {
+    return {
+        primary: (linkedMap.get(fileId) || []).length,
+        additional: (auxMap.get(fileId) || []).length,
+        chats: chatIndexLoaded ? (chatBoundMap.get(fileId) || []).length : null,
+    };
+}
+
 function usedByCount(fileId) {
-    if (usedByMode === 'chats') {
-        if (!chatIndexLoaded) return null;
-        return (chatBoundMap.get(fileId) || []).length;
-    }
-    // Union of primary + additional users; a char with both counts once.
-    const prim = linkedMap.get(fileId) || [];
-    const aux = auxMap.get(fileId) || [];
-    if (!aux.length) return prim.length;
-    const set = new Set(prim.map(l => l.avatar));
-    aux.forEach(a => set.add(a.avatar));
-    return set.size;
+    const counts = bindingCountsFor(fileId);
+    return counts.primary + counts.additional + (counts.chats ?? 0);
 }
 
 // Build world file_id -> bound chats, from one /chats/recent (all chats, with metadata).
-// Lazy: only when the user first flips to Chats mode. Cached for the session; invalidated
-// on bind/unbind. Re-renders the sidebar when ready so badges fill in.
+// Start in the background when the list opens. Cached for the session; updates after
+// bind/unbind keep the sidebar and editor in sync without fetching every chat again.
 async function ensureChatIndex() {
     if (chatIndexLoaded || chatIndexLoading || chatIndexFailed) return;
+    const token = ++chatIndexToken;
     chatIndexLoading = true;
     renderWorldList(); // show "..." placeholders immediately
     try {
         const all = await CoreAPI.listAllChatsWithMeta();
+        if (token !== chatIndexToken) return;
         chatBoundMap = new Map();
         for (const c of all) {
             if (!chatBoundMap.has(c.world)) chatBoundMap.set(c.world, []);
@@ -549,9 +539,11 @@ async function ensureChatIndex() {
         }
         chatIndexLoaded = true;
     } catch (e) {
+        if (token !== chatIndexToken) return;
         chatIndexFailed = true;
         console.error('[Lorebooks] chat index build failed', e);
     } finally {
+        if (token !== chatIndexToken) return;
         chatIndexLoading = false;
         renderWorldList();
         // Patch the chips only. A full renderEditor here would wipe entry text typed while the index loaded.
@@ -560,39 +552,29 @@ async function ensureChatIndex() {
 }
 
 function invalidateChatIndex() {
+    ++chatIndexToken;
+    chatIndexLoading = false;
     chatIndexLoaded = false;
     chatIndexFailed = false;
     chatBoundMap = new Map();
-}
-
-function setUsedByMode(mode) {
-    if (mode !== 'characters' && mode !== 'chats') return;
-    if (mode === usedByMode) return;
-    usedByMode = mode;
-    document.querySelectorAll('.lb-usedby-opt').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
-    const searchEl = document.getElementById('lbWorldSearch');
-    if (searchEl) searchEl.placeholder = mode === 'chats' ? 'Search lorebooks or chats...' : 'Search lorebooks or characters...';
-    renderWorldList();
-    if (currentWorld) renderEditor();
-    if (mode === 'chats') ensureChatIndex(); // lazy build on first switch
 }
 
 // ========================================
 // WORLD LIST (SIDEBAR)
 // ========================================
 
-// Names (character names) under the active lens whose value matches the query, used to
-// surface "I know the character/chat, not the book". Characters lens -> linked char names;
-// Chats lens -> the character names of chats bound to this world.
+// Search every relationship, including chat filenames, without switching views.
 function matchedNamesFor(fileId, q) {
     if (!q) return [];
-    if (usedByMode === 'chats') {
-        return (chatBoundMap.get(fileId) || [])
-            .filter(c => (c.charName || '').toLowerCase().includes(q))
-            .map(c => c.charName);
-    }
     const both = [...(linkedMap.get(fileId) || []), ...(auxMap.get(fileId) || [])];
-    return [...new Set(both.filter(l => l.name.toLowerCase().includes(q)).map(l => l.name))];
+    const names = both.filter(l => l.name.toLowerCase().includes(q)).map(l => l.name);
+    for (const chat of chatBoundMap.get(fileId) || []) {
+        const chatName = (chat.file_name || '').replace(/\.jsonl$/i, '');
+        if (`${chat.charName || ''} ${chatName}`.toLowerCase().includes(q)) {
+            names.push(`${chat.charName || chat.avatar}: ${chatName}`);
+        }
+    }
+    return [...new Set(names)];
 }
 
 function worldMatchesQuery(w, q) {
@@ -620,6 +602,23 @@ function filteredSortedWorlds() {
     return list;
 }
 
+function renderBindingBadges(counts) {
+    const kinds = [
+        ['primary', 'link', 'Primary lorebook', 'character'],
+        ['additional', 'book-medical', 'Additional lorebook', 'character'],
+        ['chats', 'comments', 'Chat lorebook', 'chat'],
+    ];
+    return kinds.map(([kind, icon, label, unit]) => {
+        const count = counts[kind];
+        if (count === 0) return '';
+        const title = count === null
+            ? (chatIndexFailed ? 'Chat bindings unavailable' : 'Loading chat bindings...')
+            : `${label}: ${count} ${unit}${count === 1 ? '' : 's'}`;
+        const value = count === null ? (chatIndexFailed ? '?' : '...') : count;
+        return `<span class="lb-world-linked-badge lb-world-binding-${kind}" title="${title}" aria-label="${title}"><i class="fa-solid fa-${icon}" aria-hidden="true"></i>${value}</span>`;
+    }).join('');
+}
+
 function renderWorldList() {
     const listEl = document.getElementById('lbWorldList');
     if (!listEl) return;
@@ -642,9 +641,8 @@ function renderWorldList() {
     }
 
     const q = worldSearch.trim().toLowerCase();
-    const usingChats = usedByMode === 'chats';
     for (const w of list) {
-        const used = usedByCount(w.file_id); // null while chat index loads
+        const bindings = bindingCountsFor(w.file_id);
         const count = entryCountOf(w);
         const active = w.file_id === currentWorld ? ' active' : '';
         // Only flag a linked-character match when the query didn't already hit the book name (file_id).
@@ -653,23 +651,23 @@ function renderWorldList() {
         const meta = [];
         if (count === null) meta.push('...');
         else meta.push(`${count} ${count === 1 ? 'entry' : 'entries'}`);
-        if (used === null) meta.push('...');
-        else if (used > 0) meta.push(usingChats ? `${used} chat${used === 1 ? '' : 's'}` : `${used} linked`);
+        if (bindings.primary) meta.push(`${bindings.primary} primary`);
+        if (bindings.additional) meta.push(`${bindings.additional} additional`);
+        if (bindings.chats === null) meta.push(chatIndexFailed ? 'chats unavailable' : 'chats loading...');
+        else if (bindings.chats) meta.push(`${bindings.chats} chat${bindings.chats === 1 ? '' : 's'}`);
         const viaLine = nameHits.length
-            ? `<span class="lb-world-via" title="${esc(nameHits.join(', '))}"><i class="fa-solid fa-${usingChats ? 'comments' : 'user'}"></i> via ${esc(nameHits.join(', '))}</span>`
+            ? `<span class="lb-world-via" title="${esc(nameHits.join(', '))}"><i class="fa-solid fa-magnifying-glass"></i> via ${esc(nameHits.join(', '))}</span>`
             : '';
-        const badge = (used && used > 0)
-            ? `<span class="lb-world-linked-badge" title="${used} ${usingChats ? `bound chat${used === 1 ? '' : 's'}` : `linked character${used === 1 ? '' : 's'}`}"><i class="fa-solid fa-${usingChats ? 'comments' : 'link'}"></i>${used}</span>`
-            : '';
+        const badges = renderBindingBadges(bindings);
         html += `
             <button class="lb-world-row${active}${nameHits.length ? ' char-match' : ''}" data-action="select-world" data-world="${esc(w.file_id)}" title="${esc(w.file_id)}">
                 <i class="fa-solid fa-book lb-world-icon"></i>
                 <span class="lb-world-info">
                     <span class="lb-world-name">${esc(w.file_id)}</span>
-                    <span class="lb-world-meta">${esc(meta.join('  ·  '))}</span>
+                    <span class="lb-world-meta">${meta.map(part => `<span>${esc(part)}</span>`).join('  ·  ')}</span>
                     ${viaLine}
                 </span>
-                ${badge}
+                ${badges ? `<span class="lb-world-badges">${badges}</span>` : ''}
             </button>`;
     }
 
@@ -933,7 +931,7 @@ function renderLinkedChips(linked, aux = []) {
     return `<span class="lb-linked-chips">${chips}${more}</span>`;
 }
 
-// Chats-lens equivalent of renderLinkedChips: the chats bound to the current world.
+// Chats bound to the current world, shown alongside character relationships.
 function renderBoundChatChips() {
     if (chatIndexFailed) return `<span class="lb-meta-pill subtle"><i class="fa-solid fa-link-slash"></i> Couldn't load chat bindings</span>`;
     if (!chatIndexLoaded) return `<span class="lb-meta-pill subtle"><i class="fa-solid fa-spinner fa-spin"></i> Loading chats...</span>`;
@@ -1672,7 +1670,7 @@ async function unbindChatFromCurrentWorld(c) {
     const success = await CoreAPI.setChatBoundWorld(charRef, c.file_name, '');
     if (!success) { CoreAPI.showToast('Failed to unbind (the chat may be open in SillyTavern)', 'error'); return; }
     // Update the in-memory reverse index, then re-render.
-    const list = (chatBoundMap.get(currentWorld) || []).filter(x => x.file_name !== c.file_name);
+    const list = (chatBoundMap.get(currentWorld) || []).filter(x => x.file_name !== c.file_name || x.avatar !== c.avatar);
     if (list.length) chatBoundMap.set(currentWorld, list);
     else chatBoundMap.delete(currentWorld);
     renderEditor();
@@ -2503,6 +2501,12 @@ async function applyChatLinks() {
         // Keep the reverse index in sync (only if it's been built) so the editor + sidebar reflect
         // the new bindings without a full refetch.
         if (chatIndexLoaded && newlyBound.length) {
+            for (const [world, chats] of chatBoundMap) {
+                if (world === book) continue;
+                const remaining = chats.filter(c => !newlyBound.some(nb => nb.avatar === c.avatar && nb.file_name === c.file_name));
+                if (remaining.length) chatBoundMap.set(world, remaining);
+                else chatBoundMap.delete(world);
+            }
             const list = chatBoundMap.get(book) || [];
             for (const nb of newlyBound) {
                 if (!list.some(x => x.file_name === nb.file_name && x.avatar === nb.avatar)) list.push(nb);
@@ -2698,10 +2702,6 @@ function attachEvents() {
         worldSort = e.target.value;
         renderWorldList();
     });
-    // Used-by lens toggle (Characters | Chats) governs sidebar badges/sort + editor usage.
-    document.querySelectorAll('.lb-usedby-opt').forEach(btn => {
-        btn.addEventListener('click', () => setUsedByMode(btn.dataset.mode));
-    });
 
     // Sidebar delegation (world rows + inline new-name input)
     document.getElementById('lbWorldList')?.addEventListener('click', (e) => {
@@ -2865,7 +2865,6 @@ function onContentClick(e) {
         case 'bind-chats': openLinkPicker('chats'); break;
         case 'manage-char-links': openLinkPicker('characters', { manage: true }); break;
         case 'manage-chat-links': openLinkPicker('chats', { manage: true }); break;
-        case 'manage-links': openLinkPicker(usedByMode === 'chats' ? 'chats' : 'characters', { manage: true }); break;
         case 'duplicate-world': duplicateWorld(); break;
         case 'export-world': exportWorld(); break;
         case 'delete-world': deleteWorld(); break;

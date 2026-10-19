@@ -14,7 +14,7 @@ import CoreAPI from './core-api.js';
 // CSS LOADER
 // ========================================
 
-const MODULE_CSS_VERSION = 85;
+const MODULE_CSS_VERSION = 86;
 
 function loadModuleCSS(path) {
     return new Promise((resolve) => {
@@ -172,6 +172,11 @@ async function initModuleSystem() {
     window.debugLog?.('[ModuleLoader] Initializing module system...');
 
     const dependencies = {};
+
+    // The Lorebooks launcher can open before Tier 1 finishes. Install chat stubs first
+    // so its initial binding summary loads real chat metadata instead of caching an empty list.
+    loadModuleCSS('./chats.css');
+    setupLazyChats();
 
     // ============================
     // TIER 1 - Immediate modules
@@ -404,8 +409,6 @@ async function initModuleSystem() {
     setupLazyBatchTagging();
     setupLazyTagsManager();
     setupLazyBatchTransfer();
-    loadModuleCSS('./chats.css');
-    setupLazyChats();
 
     // Initialize all Tier 1 modules
     await ModuleLoader.initAll(dependencies);
