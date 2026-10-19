@@ -6,13 +6,16 @@ let data = null;
 let loading = null;
 let writes = Promise.resolve();
 
+// Version 1 folder data upgrades on the next save. Folder-only clients reject version 2
+// rather than silently stripping tags when they change a folder.
 function emptyData() {
-    return { version: 1, folders: [], assignments: Object.create(null), uncategorizedCollapsed: false };
+    return { version: 2, folders: [], assignments: Object.create(null), tags: Object.create(null), uncategorizedCollapsed: false };
 }
 
 function normalize(raw) {
-    if (!raw || raw.version !== 1 || !Array.isArray(raw.folders)
-        || !raw.assignments || typeof raw.assignments !== 'object' || Array.isArray(raw.assignments)) {
+    if (!raw || ![1, 2].includes(raw.version) || !Array.isArray(raw.folders)
+        || !raw.assignments || typeof raw.assignments !== 'object' || Array.isArray(raw.assignments)
+        || (raw.tags !== undefined && (!raw.tags || typeof raw.tags !== 'object' || Array.isArray(raw.tags)))) {
         throw new Error('Unsupported or invalid lorebook folder data');
     }
     const result = emptyData();
@@ -25,6 +28,17 @@ function normalize(raw) {
     }
     for (const [world, id] of Object.entries(raw.assignments)) {
         if (ids.has(id)) result.assignments[world] = id;
+    }
+    for (const [world, tags] of Object.entries(raw.tags || {})) {
+        if (!Array.isArray(tags)) throw new Error('Invalid lorebook tags');
+        const seen = new Set();
+        const clean = tags.filter(tag => typeof tag === 'string').map(tag => tag.trim()).filter(tag => {
+            const key = tag.toLowerCase();
+            if (!tag || tag.length > 80 || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+        if (clean.length) result.tags[world] = clean;
     }
     result.uncategorizedCollapsed = !!raw.uncategorizedCollapsed;
     return result;
@@ -57,7 +71,7 @@ function change(edit) {
             name: FILE_NAME,
             data: CoreAPI.utf8ToBase64(JSON.stringify(next)),
         });
-        if (!response.ok) throw new Error(`Could not save folders (${response.status})`);
+        if (!response.ok) throw new Error(`Could not save lorebook organization (${response.status})`);
         data = next;
         return result;
     });
@@ -139,18 +153,47 @@ function toggleFolder(id) {
 function renameWorld(oldName, newName) {
     return change(next => {
         const id = next.assignments[oldName];
-        if (!id) return false;
-        next.assignments[newName] = id;
+        const tags = next.tags[oldName];
+        if (oldName === newName || (!id && !tags)) return false;
+        if (id) next.assignments[newName] = id;
+        if (tags) next.tags[newName] = tags;
         delete next.assignments[oldName];
+        delete next.tags[oldName];
     });
 }
 
 function removeWorld(world) {
     return change(next => {
-        if (!Object.hasOwn(next.assignments, world)) return false;
+        if (!Object.hasOwn(next.assignments, world) && !Object.hasOwn(next.tags, world)) return false;
         delete next.assignments[world];
+        delete next.tags[world];
+    });
+}
+
+function getTags(world) {
+    return [...(data?.tags[world] || [])];
+}
+
+function setTags(world, values) {
+    return change(next => {
+        if (!Array.isArray(values)) throw new Error('Invalid lorebook tags');
+        const known = new Map();
+        for (const tag of Object.values(next.tags).flat()) {
+            if (!known.has(tag.toLowerCase())) known.set(tag.toLowerCase(), tag);
+        }
+        const seen = new Set();
+        const tags = [];
+        for (const value of values) {
+            const tag = typeof value === 'string' ? value.trim() : '';
+            if (!tag || tag.length > 80) throw new Error('Tags must contain between 1 and 80 characters');
+            const key = tag.toLowerCase();
+            if (!seen.has(key)) tags.push(known.get(key) || tag);
+            seen.add(key);
+        }
+        if (tags.length) next.tags[world] = tags;
+        else delete next.tags[world];
     });
 }
 
 export default { load, isReady: () => !!data, getFolders, folderFor, isCollapsed,
-    createFolder, renameFolder, deleteFolder, moveWorld, toggleFolder, renameWorld, removeWorld };
+    createFolder, renameFolder, deleteFolder, moveWorld, toggleFolder, renameWorld, removeWorld, getTags, setTags };

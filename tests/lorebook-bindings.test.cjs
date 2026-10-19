@@ -16,6 +16,7 @@ function harness(overrides = {}) {
         FolderStore: {
             load: async () => {}, isReady: () => true,
             getFolders: () => [], folderFor: () => '', isCollapsed: () => false,
+            getTags: () => [],
         },
         CoreAPI: {
             escapeHtml: s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])),
@@ -196,4 +197,53 @@ test('folder names are escaped and Uncategorized has no rename or delete control
     assert.doesNotMatch(h.list.innerHTML, /<img/);
     assert.match(h.list.innerHTML, /&lt;img/);
     assert.doesNotMatch(h.list.innerHTML, /data-action="(?:delete|rename)-folder" data-folder=""/);
+});
+
+test('tag filtering supports all, any and untagged, combined with text search', () => {
+    const h = harness();
+    h.context.FolderStore.getTags = name => ({ Shared: ['剧情', 'Fantasy'], Other: ['剧情'], Empty: [] }[name] || []);
+    h.run("worldsList.push({file_id:'Other'}, {file_id:'Empty'}); selectedWorldTags.add('剧情'); selectedWorldTags.add('fantasy')");
+    assert.deepEqual(h.json('filteredSortedWorlds().map(w => w.file_id)'), ['Shared']);
+    h.run("worldTagMatch = 'any'");
+    assert.deepEqual(h.json('filteredSortedWorlds().map(w => w.file_id)'), ['Other', 'Shared']);
+    h.run("worldSearch = 'bob'");
+    assert.deepEqual(h.json('filteredSortedWorlds().map(w => w.file_id)'), ['Shared']);
+    h.run("worldSearch = ''; selectedWorldTags.clear(); untaggedOnly = true");
+    assert.deepEqual(h.json('filteredSortedWorlds().map(w => w.file_id)'), ['Empty']);
+    h.run('untaggedOnly = false');
+    assert.equal(h.run('filteredSortedWorlds().length'), 3);
+});
+
+test('tag filters reveal matching collapsed folders without changing their saved state', () => {
+    const h = harness();
+    Object.assign(h.context.FolderStore, {
+        getFolders: () => [{ id: 'one', name: 'Characters' }],
+        folderFor: () => 'one', isCollapsed: () => true, getTags: () => ['剧情'],
+    });
+    h.run("selectedWorldTags.add('剧情'); renderWorldList()");
+    assert.deepEqual(h.json('visibleSortedWorlds().map(w => w.file_id)'), ['Shared']);
+    assert.match(h.list.innerHTML, /1 \/ 1/);
+    h.run('selectedWorldTags.clear(); renderWorldList()');
+    assert.deepEqual(h.json('visibleSortedWorlds()'), []);
+});
+
+test('tag option counts are global per-book counts and retain zero-count selections', () => {
+    const h = harness();
+    h.context.FolderStore.getTags = name => name === 'Shared' ? ['Fantasy', 'fantasy'] : ['Fantasy', '剧情'];
+    h.run("worldsList.push({file_id:'Other'}); worldSearch = 'Shared'; selectedWorldTags.add('missing')");
+    const options = h.json('getWorldTagOptions()');
+    assert.equal(options.find(t => t.key === 'fantasy').count, 2);
+    assert.equal(options.find(t => t.key === '剧情').count, 1);
+    assert.equal(options.find(t => t.key === 'missing').count, 0);
+    assert.equal(h.run('filteredSortedWorlds().length'), 0);
+});
+
+test('tag labels and action names remain escaped, with compact overflow for many labels', () => {
+    const h = harness();
+    h.context.FolderStore.getTags = () => ['<img onerror="bad">', '剧情', '规则', '第四个标签'];
+    h.run('renderWorldList()');
+    assert.doesNotMatch(h.list.innerHTML, /<img/);
+    assert.match(h.list.innerHTML, /&lt;img/);
+    assert.match(h.list.innerHTML, /\+1/);
+    assert.match(h.list.innerHTML, /data-action="edit-tags"/);
 });

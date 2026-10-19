@@ -138,8 +138,81 @@ test('duplicate, blank and reserved names are rejected; filenames with prototype
 });
 
 test('malformed or future-version data is never replaced by an empty file', async () => {
-    const a = account({ version: 2, folders: [], assignments: {} });
+    const a = account({ version: 3, folders: [], assignments: {} });
     await assert.rejects(a.store.load(), /invalid/);
     await assert.rejects(a.store.createFolder('Test'), /invalid/);
     assert.equal(a.io.uploads, 0);
+});
+
+test('existing folder data upgrades to tags without losing membership or collapse state', async () => {
+    const a = account({ version: 1, folders: [{ id: 'old', name: 'Old', collapsed: true }], assignments: { A: 'old' }, uncategorizedCollapsed: true });
+    await a.store.load();
+    assert.equal(a.store.getTags('A').length, 0);
+    await a.store.setTags('A', ['剧情', '通用']);
+    assert.equal(a.io.disk.version, 2);
+    assert.equal(a.store.folderFor('A'), 'old');
+    assert.equal(a.store.isCollapsed('old'), true);
+    assert.equal(a.store.isCollapsed(''), true);
+    const reopened = a.session();
+    await reopened.load();
+    assert.deepEqual([...reopened.getTags('A')], ['剧情', '通用']);
+});
+
+test('tags are trimmed, deduplicated and reuse existing spelling without exposing mutable arrays', async () => {
+    const { store } = account();
+    await store.setTags('A', [' Fantasy ', 'fantasy', '剧情']);
+    await store.setTags('B', ['FANTASY']);
+    assert.deepEqual([...store.getTags('A')], ['Fantasy', '剧情']);
+    assert.deepEqual([...store.getTags('B')], ['Fantasy']);
+    const tags = store.getTags('A');
+    tags.push('Not saved');
+    assert.equal(store.getTags('A').length, 2);
+    await assert.rejects(store.setTags('A', ['']), /characters/);
+    await assert.rejects(store.setTags('A', ['x'.repeat(81)]), /characters/);
+});
+
+test('concurrent tags and folder changes preserve each other; folder deletion keeps tags', async () => {
+    const a = account();
+    const id = await a.store.createFolder('Folder');
+    await Promise.all([a.store.setTags('A', ['剧情']), a.store.moveWorld('A', id), a.store.setTags('B', ['规则'])]);
+    await a.store.deleteFolder(id);
+    assert.equal(a.store.folderFor('A'), '');
+    assert.deepEqual([...a.store.getTags('A')], ['剧情']);
+    assert.deepEqual([...a.store.getTags('B')], ['规则']);
+    assert.deepEqual(a.io.disk.tags.A, ['剧情']);
+});
+
+test('renaming an uncategorized book preserves tags and deleting it clears them', async () => {
+    const { store } = account();
+    await store.setTags('Old', ['剧情']);
+    await store.renameWorld('Old', 'Old');
+    assert.deepEqual([...store.getTags('Old')], ['剧情']);
+    await store.renameWorld('Old', 'New');
+    assert.equal(store.getTags('Old').length, 0);
+    assert.deepEqual([...store.getTags('New')], ['剧情']);
+    await store.removeWorld('New');
+    assert.equal(store.getTags('New').length, 0);
+});
+
+test('failed tag saves preserve the previous tags and support retrying or removing all tags', async () => {
+    const a = account();
+    await a.store.setTags('A', ['Keep']);
+    a.io.failWrite = true;
+    await assert.rejects(a.store.setTags('A', ['Changed']), /save/);
+    assert.deepEqual([...a.store.getTags('A')], ['Keep']);
+    a.io.failWrite = false;
+    await a.store.setTags('A', []);
+    assert.equal(a.store.getTags('A').length, 0);
+    assert.equal(a.io.disk.tags.A, undefined);
+});
+
+test('tag maps handle prototype filenames and reject malformed data before saving', async () => {
+    const a = account();
+    await a.store.setTags('__proto__', ['剧情']);
+    const reopened = a.session();
+    await reopened.load();
+    assert.deepEqual([...reopened.getTags('__proto__')], ['剧情']);
+    const malformed = account({ version: 2, folders: [], assignments: {}, tags: { A: 'bad' } });
+    await assert.rejects(malformed.store.createFolder('New'), /tags/);
+    assert.equal(malformed.io.uploads, 0);
 });

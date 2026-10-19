@@ -2,7 +2,7 @@
 // duplicate/import/export) via ST's /worldinfo helpers. Character-embedded books edit in the detail modal.
 
 import CoreAPI from './core-api.js';
-import FolderStore from './lorebook-folders.js?v=1';
+import FolderStore from './lorebook-folders.js?v=2';
 import { proxyEncode } from './providers/provider-utils.js';
 
 const esc = (s) => CoreAPI.escapeHtml(String(s ?? ''));
@@ -186,6 +186,12 @@ let creatingNew = false;
 let folderLoadError = false;
 let organizeJob = null;
 let organizeBusy = false;
+let organizeTags = [];
+const selectedWorldTags = new Set();
+let untaggedOnly = false;
+let worldTagMatch = 'all';
+let tagFilterOpen = false;
+let tagFilterSearch = '';
 
 const expandedUids = new Set();
 const advancedUids = new Set();
@@ -274,6 +280,18 @@ function createModal() {
                             </select>
                             <button class="lb-icon-btn lb-new-folder-btn" id="lbNewFolderBtn" title="New folder" aria-label="New folder" disabled><i class="fa-solid fa-folder-plus"></i></button>
                         </div>
+                        <button class="lb-tag-filter-toggle" id="lbTagFilterBtn" aria-label="Filter lorebooks by tags" aria-controls="lbTagFilterPanel" aria-expanded="false" disabled>
+                            <i class="fa-solid fa-tags"></i> Tags <span id="lbTagFilterSummary">All</span><i class="fa-solid fa-chevron-down"></i>
+                        </button>
+                        <div id="lbTagFilterPanel" class="lb-tag-filter-panel hidden">
+                            <input type="search" id="lbTagFilterSearch" class="cl-input" placeholder="Search tags..." autocomplete="off">
+                            <select id="lbTagMatch" class="cl-input" aria-label="Tag match mode">
+                                <option value="all">Match all selected</option><option value="any">Match any selected</option>
+                            </select>
+                            <label class="lb-tag-filter-option"><input type="checkbox" id="lbUntaggedOnly"> Untagged</label>
+                            <div id="lbTagFilterOptions" class="lb-tag-filter-options"></div>
+                            <button type="button" class="lb-tag-clear" id="lbClearTagFilters">Clear tag filters</button>
+                        </div>
                     </div>
                     <div class="lb-world-list" id="lbWorldList"></div>
                 </aside>
@@ -299,6 +317,15 @@ function createModal() {
                 <input id="lbOrganizeName" class="cl-input" type="text" maxlength="80" autocomplete="off">
                 <label for="lbOrganizeTarget" id="lbOrganizeTargetLabel">Folder</label>
                 <select id="lbOrganizeTarget" class="cl-input"></select>
+                <div id="lbOrganizeTags" class="hidden">
+                    <div id="lbTagDraft" class="lb-tag-draft"></div>
+                    <div class="lb-tag-add-row">
+                        <input id="lbTagName" class="cl-input" type="text" maxlength="80" placeholder="Add a tag..." aria-label="Tag name" autocomplete="off">
+                        <button type="button" class="cl-btn cl-btn-secondary" id="lbAddTagBtn">Add</button>
+                    </div>
+                    <p class="lb-organize-hint">Press Enter to add a tag, or reuse one below. Save to apply changes.</p>
+                    <div id="lbTagSuggestions" class="lb-tag-suggestions"></div>
+                </div>
                 <p class="lb-organize-hint" id="lbOrganizeHint"></p>
             </div>
             <div class="cl-modal-footer">
@@ -618,9 +645,60 @@ function worldMatchesQuery(w, q) {
     return matchedNamesFor(w.file_id, q).length > 0;
 }
 
+function getWorldTagOptions() {
+    const options = new Map();
+    for (const world of worldsList) {
+        const counted = new Set();
+        for (const tag of FolderStore.getTags(world.file_id)) {
+            const key = tag.toLowerCase();
+            if (counted.has(key)) continue;
+            counted.add(key);
+            if (!options.has(key)) options.set(key, { key, tag, count: 0 });
+            options.get(key).count++;
+        }
+    }
+    // Keep selected zero-count tags available, so removing a book's last tag never
+    // silently clears an active filter and unexpectedly shows the whole library.
+    for (const key of selectedWorldTags) if (!options.has(key)) options.set(key, { key, tag: key, count: 0 });
+    return [...options.values()].sort((a, b) => a.tag.localeCompare(b.tag));
+}
+
+function worldMatchesTags(world) {
+    const keys = new Set(FolderStore.getTags(world.file_id).map(tag => tag.toLowerCase()));
+    if (untaggedOnly) return keys.size === 0;
+    if (!selectedWorldTags.size) return true;
+    const selected = [...selectedWorldTags];
+    return worldTagMatch === 'any' ? selected.some(key => keys.has(key)) : selected.every(key => keys.has(key));
+}
+
+function hasWorldFilters() {
+    return !!worldSearch.trim() || selectedWorldTags.size > 0 || untaggedOnly;
+}
+
+function renderTagFilters() {
+    const button = document.getElementById('lbTagFilterBtn');
+    if (!button) return;
+    button.disabled = !FolderStore.isReady();
+    button.setAttribute('aria-expanded', String(tagFilterOpen));
+    button.classList.toggle('active', selectedWorldTags.size > 0 || untaggedOnly);
+    document.getElementById('lbTagFilterSummary').textContent = untaggedOnly ? 'Untagged' : selectedWorldTags.size ? `${selectedWorldTags.size} selected` : 'All';
+    document.getElementById('lbTagFilterPanel').classList.toggle('hidden', !tagFilterOpen);
+    document.getElementById('lbUntaggedOnly').checked = untaggedOnly;
+    document.getElementById('lbTagMatch').value = worldTagMatch;
+    const options = document.getElementById('lbTagFilterOptions');
+    const focusedKey = document.activeElement?.closest('#lbTagFilterOptions') ? document.activeElement.dataset.tag : null;
+    const query = tagFilterSearch.trim().toLowerCase();
+    const tags = getWorldTagOptions().filter(t => t.tag.toLowerCase().includes(query));
+    options.innerHTML = tags.map(t => `<label class="lb-tag-filter-option">
+        <input type="checkbox" data-tag="${esc(t.key)}" ${selectedWorldTags.has(t.key) ? 'checked' : ''}>
+        <span class="lb-tag-label">${esc(t.tag)}</span><span class="lb-folder-count">${t.count}</span>
+    </label>`).join('') || `<p class="lb-tag-empty">${query ? 'No matching tags.' : 'No tags yet. Add tags using the tag button beside a lorebook.'}</p>`;
+    if (focusedKey !== null) [...options.querySelectorAll('input[data-tag]')].find(el => el.dataset.tag === focusedKey)?.focus();
+}
+
 function filteredSortedWorlds() {
     const q = worldSearch.trim().toLowerCase();
-    let list = worldsList.filter(w => worldMatchesQuery(w, q));
+    let list = worldsList.filter(w => worldMatchesQuery(w, q) && worldMatchesTags(w));
     const usedCount = (w) => usedByCount(w.file_id) ?? 0;
     switch (worldSort) {
         case 'name_desc':
@@ -653,15 +731,15 @@ function renderBindingBadges(counts) {
 }
 
 // The saved folder order is stable; the selected world sort applies within each folder.
-// Search expands only the matching groups without modifying their saved collapse state.
+// Search and tag filters expand matching groups without changing saved collapse states.
 function groupedWorlds(list = filteredSortedWorlds()) {
     const groups = [...FolderStore.getFolders(), { id: '', name: 'Uncategorized' }]
         .map(folder => ({ ...folder, worlds: [], total: 0,
-            expanded: !!worldSearch.trim() || !FolderStore.isCollapsed(folder.id) }));
+            expanded: hasWorldFilters() || !FolderStore.isCollapsed(folder.id) }));
     const byId = new Map(groups.map(group => [group.id, group]));
     for (const world of worldsList) (byId.get(FolderStore.folderFor(world.file_id)) || byId.get('')).total++;
     for (const world of list) (byId.get(FolderStore.folderFor(world.file_id)) || byId.get('')).worlds.push(world);
-    return worldSearch.trim() ? groups.filter(group => group.worlds.length) : groups;
+    return hasWorldFilters() ? groups.filter(group => group.worlds.length) : groups;
 }
 
 function visibleSortedWorlds() {
@@ -685,6 +763,8 @@ function renderWorldRow(w, q) {
         ? `<span class="lb-world-via" title="${esc(nameHits.join(', '))}"><i class="fa-solid fa-magnifying-glass"></i> via ${esc(nameHits.join(', '))}</span>`
         : '';
     const badges = renderBindingBadges(bindings);
+    const tags = FolderStore.getTags(w.file_id);
+    const tagLine = tags.length ? `<span class="lb-world-tags">${tags.slice(0, 3).map(tag => `<span class="lb-world-tag" title="${esc(tag)}">${esc(tag)}</span>`).join('')}${tags.length > 3 ? `<span class="lb-world-tag" title="${esc(tags.slice(3).join(', '))}">+${tags.length - 3}</span>` : ''}</span>` : '';
     return `
         <div class="lb-world-item">
             <button class="lb-world-row${active}${nameHits.length ? ' char-match' : ''}" data-action="select-world" data-world="${esc(w.file_id)}" title="${esc(w.file_id)}">
@@ -693,10 +773,14 @@ function renderWorldRow(w, q) {
                     <span class="lb-world-name">${esc(w.file_id)}</span>
                     <span class="lb-world-meta">${meta.map(part => `<span>${esc(part)}</span>`).join('  ·  ')}</span>
                     ${viaLine}
+                    ${tagLine}
                 </span>
                 ${badges ? `<span class="lb-world-badges">${badges}</span>` : ''}
             </button>
-            <button class="lb-folder-action lb-world-move" data-action="move-world" data-world="${esc(w.file_id)}" title="Move to folder" aria-label="Move ${esc(w.file_id)} to folder" ${FolderStore.isReady() ? '' : 'disabled'}><i class="fa-solid fa-folder-open"></i></button>
+            <span class="lb-world-actions">
+                <button class="lb-folder-action" data-action="edit-tags" data-world="${esc(w.file_id)}" title="Edit tags" aria-label="Edit tags for ${esc(w.file_id)}" ${FolderStore.isReady() ? '' : 'disabled'}><i class="fa-solid fa-tags"></i></button>
+                <button class="lb-folder-action lb-world-move" data-action="move-world" data-world="${esc(w.file_id)}" title="Move to folder" aria-label="Move ${esc(w.file_id)} to folder" ${FolderStore.isReady() ? '' : 'disabled'}><i class="fa-solid fa-folder-open"></i></button>
+            </span>
         </div>`;
 }
 
@@ -705,10 +789,11 @@ function renderWorldList() {
     if (!listEl) return;
 
     const list = filteredSortedWorlds();
+    renderTagFilters();
     let html = '';
     const createFolderBtn = document.getElementById('lbNewFolderBtn');
     if (createFolderBtn) createFolderBtn.disabled = !FolderStore.isReady();
-    if (folderLoadError) html += '<div class="lb-list-empty" role="status">Folders could not be loaded. Reopen Lorebooks to retry. Your lorebooks are still available.</div>';
+    if (folderLoadError) html += '<div class="lb-list-empty" role="status">Folders and tags could not be loaded. Reopen Lorebooks to retry. Your lorebooks are still available.</div>';
 
     if (creatingNew) {
         html += `
@@ -721,16 +806,16 @@ function renderWorldList() {
     if (list.length === 0 && !creatingNew) {
         html += worldsList.length === 0
             ? `<div class="lb-list-empty">No lorebooks yet.<br>Create or import one to start.</div>`
-            : `<div class="lb-list-empty">No matches for "${esc(worldSearch)}".</div>`;
+            : '<div class="lb-list-empty">No lorebooks match the current filters.</div>';
     }
 
     const q = worldSearch.trim().toLowerCase();
     for (const group of groupedWorlds(list)) {
         const id = esc(group.id);
-        const count = q ? `${group.worlds.length} / ${group.total}` : group.total;
+        const count = hasWorldFilters() ? `${group.worlds.length} / ${group.total}` : group.total;
         html += `<section class="lb-folder-group">
             <div class="lb-folder-head">
-                <button class="lb-folder-toggle" data-action="toggle-folder" data-folder="${id}" aria-expanded="${group.expanded}" ${q || !FolderStore.isReady() ? 'disabled' : ''} title="${q ? 'Clear search to collapse folders' : esc(group.name)}">
+                <button class="lb-folder-toggle" data-action="toggle-folder" data-folder="${id}" aria-expanded="${group.expanded}" ${hasWorldFilters() || !FolderStore.isReady() ? 'disabled' : ''} title="${hasWorldFilters() ? 'Clear filters to collapse folders' : esc(group.name)}">
                     <i class="fa-solid fa-chevron-${group.expanded ? 'down' : 'right'} lb-folder-chevron" aria-hidden="true"></i>
                     <i class="fa-solid fa-folder${group.expanded ? '-open' : ''}" aria-hidden="true"></i>
                     <span class="lb-folder-name">${esc(group.name)}</span><span class="lb-folder-count">${count}</span>
@@ -762,53 +847,95 @@ function closeOrganizeDialog() {
     if (wasVisible) document.getElementById('lbNewFolderBtn')?.focus();
 }
 
+function renderTagSuggestions() {
+    const input = document.getElementById('lbTagName');
+    const query = input.value.trim().toLowerCase();
+    const selected = new Set(organizeTags.map(tag => tag.toLowerCase()));
+    document.getElementById('lbTagSuggestions').innerHTML = getWorldTagOptions()
+        .filter(t => t.count > 0 && !selected.has(t.key) && t.key.includes(query))
+        .map(t => `<button type="button" class="lb-tag-suggestion" data-add-tag="${esc(t.tag)}">${esc(t.tag)}</button>`).join('');
+}
+
+function renderTagDraft() {
+    document.getElementById('lbTagDraft').innerHTML = organizeTags.map(tag => `<span class="lb-tag-edit-chip">
+        <span>${esc(tag)}</span><button type="button" data-remove-tag="${esc(tag)}" aria-label="Remove tag ${esc(tag)}">&times;</button>
+    </span>`).join('') || '<span class="lb-tag-empty">No tags</span>';
+    renderTagSuggestions();
+}
+
+function addOrganizeTag(value = document.getElementById('lbTagName').value) {
+    if (organizeBusy) return false;
+    const tag = value.trim();
+    if (!tag) return true;
+    if (tag.length > 80) { CoreAPI.showToast('Tags must contain between 1 and 80 characters', 'warning'); return false; }
+    const key = tag.toLowerCase();
+    const canonical = getWorldTagOptions().find(t => t.key === key)?.tag || tag;
+    if (!organizeTags.some(t => t.toLowerCase() === key)) organizeTags.push(canonical);
+    document.getElementById('lbTagName').value = '';
+    renderTagDraft();
+    document.getElementById('lbTagName').focus();
+    return true;
+}
+
 function openOrganizeDialog(type, value = '') {
     if (!FolderStore.isReady() || organizeBusy) return;
     const folder = FolderStore.getFolders().find(f => f.id === value);
     if (type === 'rename' && !folder) return;
     organizeJob = { type, value };
     const moving = type === 'move';
-    document.getElementById('lbOrganizeTitle').textContent = moving ? 'Move lorebook' : type === 'rename' ? 'Rename folder' : 'New folder';
+    const tagging = type === 'tags';
+    document.getElementById('lbOrganizeTitle').textContent = tagging ? 'Edit lorebook tags' : moving ? 'Move lorebook' : type === 'rename' ? 'Rename folder' : 'New folder';
     const name = document.getElementById('lbOrganizeName');
     name.value = folder?.name || '';
-    name.required = !moving;
-    for (const id of ['lbOrganizeName', 'lbOrganizeNameLabel']) document.getElementById(id).classList.toggle('hidden', moving);
+    name.required = !moving && !tagging;
+    for (const id of ['lbOrganizeName', 'lbOrganizeNameLabel']) document.getElementById(id).classList.toggle('hidden', moving || tagging);
     for (const id of ['lbOrganizeTarget', 'lbOrganizeTargetLabel']) document.getElementById(id).classList.toggle('hidden', !moving);
     const target = document.getElementById('lbOrganizeTarget');
     target.innerHTML = '<option value="">Uncategorized</option>' + FolderStore.getFolders()
         .map(f => `<option value="${esc(f.id)}">${esc(f.name)}</option>`).join('');
     target.value = moving ? FolderStore.folderFor(value) : '';
-    document.getElementById('lbOrganizeHint').textContent = moving ? `Move "${value}" to the selected folder. Its bindings stay the same.` : '';
+    document.getElementById('lbOrganizeTags').classList.toggle('hidden', !tagging);
+    organizeTags = tagging ? FolderStore.getTags(value) : [];
+    document.getElementById('lbTagName').value = '';
+    document.getElementById('lbTagName').disabled = false;
+    if (tagging) renderTagDraft();
+    document.getElementById('lbOrganizeHint').textContent = tagging ? `Tags for "${value}"` : moving ? `Move "${value}" to the selected folder. Its bindings stay the same.` : '';
     const apply = document.getElementById('lbOrganizeApplyBtn');
-    apply.textContent = moving ? 'Move' : type === 'rename' ? 'Rename' : 'Create';
+    apply.textContent = tagging ? 'Save tags' : moving ? 'Move' : type === 'rename' ? 'Rename' : 'Create';
     apply.disabled = false;
     document.getElementById('lbOrganizeModal').classList.add('visible');
     const job = organizeJob;
     requestAnimationFrame(() => {
         if (organizeJob !== job) return;
-        (moving ? target : name).focus();
-        if (!moving) name.select();
+        (tagging ? document.getElementById('lbTagName') : moving ? target : name).focus();
+        if (!moving && !tagging) name.select();
     });
 }
 
 async function applyOrganization() {
     if (!organizeJob || organizeBusy) return;
     const job = organizeJob;
+    if (job.type === 'tags' && !addOrganizeTag()) return;
+    const tags = [...organizeTags];
     const name = document.getElementById('lbOrganizeName').value;
     const target = document.getElementById('lbOrganizeTarget').value;
     organizeBusy = true;
     const apply = document.getElementById('lbOrganizeApplyBtn');
     apply.disabled = true;
+    document.getElementById('lbTagName').disabled = true;
     try {
         if (job.type === 'create') {
             await FolderStore.createFolder(name);
             worldSearch = '';
+            selectedWorldTags.clear();
+            untaggedOnly = false;
             document.getElementById('lbWorldSearch').value = '';
         }
         else if (job.type === 'rename') await FolderStore.renameFolder(job.value, name);
         else {
             if (!worldsList.some(w => w.file_id === job.value)) throw new Error('Lorebook no longer exists');
-            await FolderStore.moveWorld(job.value, target);
+            if (job.type === 'tags') await FolderStore.setTags(job.value, tags);
+            else await FolderStore.moveWorld(job.value, target);
         }
         if (organizeJob === job) closeOrganizeDialog();
         renderWorldList();
@@ -817,6 +944,7 @@ async function applyOrganization() {
     } finally {
         organizeBusy = false;
         apply.disabled = false;
+        document.getElementById('lbTagName').disabled = false;
     }
 }
 
@@ -837,7 +965,7 @@ async function deleteLorebookFolder(id) {
 }
 
 async function toggleLorebookFolder(id) {
-    if (worldSearch.trim()) return;
+    if (hasWorldFilters()) return;
     try {
         await FolderStore.toggleFolder(id);
         renderWorldList();
@@ -1624,7 +1752,7 @@ async function doRename(oldName, newName) {
     if (!ok) { CoreAPI.showToast('Rename failed', 'error'); renderEditor(); return; }
     currentWorld = newName;
     try { await FolderStore.renameWorld(oldName, newName); }
-    catch { CoreAPI.showToast('Lorebook renamed, but its folder could not be updated. Move it to the folder again.', 'warning'); }
+    catch { CoreAPI.showToast('Lorebook renamed, but its folder and tags could not be updated. Please set them again.', 'warning'); }
 
     // Additional-book references (charLore) auto-sweep like ST's own rename does; no confirm.
     // null = bridge unreachable, so surviving references get a caveat instead.
@@ -1730,7 +1858,7 @@ async function deleteWorld() {
     const done = await CoreAPI.deleteWorldInfo(deletedName);
     if (!done) { CoreAPI.showToast('Delete failed', 'error'); return; }
     try { await FolderStore.removeWorld(deletedName); }
-    catch { CoreAPI.showToast('Lorebook deleted, but its saved folder assignment could not be cleared.', 'warning'); }
+    catch { CoreAPI.showToast('Lorebook deleted, but its saved folder and tags could not be cleared.', 'warning'); }
 
     let cleared = 0;
     if (clearLinks) {
@@ -2845,8 +2973,53 @@ function attachEvents() {
 
     document.getElementById('lbNewBtn')?.addEventListener('click', startCreate);
     document.getElementById('lbNewFolderBtn')?.addEventListener('click', () => openOrganizeDialog('create'));
+    document.getElementById('lbTagFilterBtn')?.addEventListener('click', () => {
+        tagFilterOpen = !tagFilterOpen;
+        renderTagFilters();
+    });
+    document.getElementById('lbTagFilterSearch')?.addEventListener('input', e => {
+        tagFilterSearch = e.target.value;
+        renderTagFilters();
+    });
+    document.getElementById('lbTagMatch')?.addEventListener('change', e => {
+        worldTagMatch = e.target.value === 'any' ? 'any' : 'all';
+        renderWorldList();
+    });
+    document.getElementById('lbUntaggedOnly')?.addEventListener('change', e => {
+        untaggedOnly = e.target.checked;
+        selectedWorldTags.clear();
+        renderWorldList();
+    });
+    document.getElementById('lbTagFilterOptions')?.addEventListener('change', e => {
+        const tag = e.target.dataset.tag;
+        if (tag === undefined) return;
+        if (e.target.checked) selectedWorldTags.add(tag);
+        else selectedWorldTags.delete(tag);
+        untaggedOnly = false;
+        renderWorldList();
+    });
+    document.getElementById('lbClearTagFilters')?.addEventListener('click', () => {
+        selectedWorldTags.clear();
+        untaggedOnly = false;
+        renderWorldList();
+    });
     for (const id of ['lbOrganizeCloseBtn', 'lbOrganizeCancelBtn']) document.getElementById(id)?.addEventListener('click', closeOrganizeDialog);
     document.getElementById('lbOrganizeForm')?.addEventListener('submit', e => { e.preventDefault(); applyOrganization(); });
+    document.getElementById('lbAddTagBtn')?.addEventListener('click', () => addOrganizeTag());
+    document.getElementById('lbTagName')?.addEventListener('input', renderTagSuggestions);
+    document.getElementById('lbTagName')?.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); addOrganizeTag(); }
+    });
+    document.getElementById('lbOrganizeTags')?.addEventListener('click', e => {
+        if (organizeBusy) return;
+        const add = e.target.closest('[data-add-tag]');
+        const remove = e.target.closest('[data-remove-tag]');
+        if (add) addOrganizeTag(add.dataset.addTag);
+        else if (remove) {
+            organizeTags = organizeTags.filter(tag => tag !== remove.dataset.removeTag);
+            renderTagDraft();
+        }
+    });
     document.getElementById('lbOrganizeModal')?.addEventListener('click', e => {
         if (e.target.id === 'lbOrganizeModal') closeOrganizeDialog();
     });
@@ -2892,6 +3065,7 @@ function attachEvents() {
             case 'rename-folder': openOrganizeDialog('rename', button.dataset.folder); break;
             case 'delete-folder': deleteLorebookFolder(button.dataset.folder); break;
             case 'move-world': openOrganizeDialog('move', button.dataset.world); break;
+            case 'edit-tags': openOrganizeDialog('tags', button.dataset.world); break;
         }
     });
     document.getElementById('lbWorldList')?.addEventListener('keydown', (e) => {
